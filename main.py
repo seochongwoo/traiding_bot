@@ -1,6 +1,6 @@
 import time
 from datetime import datetime, timedelta
-from config import TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD
+from config import TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS
 from crawler import fetch_news_list, get_news_content
 from db import open_worksheet, fetch_existing_urls, append_news_record
 from analyzer import analyze_news_sentiment
@@ -42,6 +42,13 @@ def run_trading_bot():
             
             if url_identifier in existing_urls:
                 # 이미 처리한 기사인 경우 스킵
+                continue
+                
+            # 제목 키워드 필터링 적용 (노이즈 뉴스 제거로 AI API 호출 및 스프레드시트 낭비 방지)
+            synonyms = KEYWORD_SYNONYMS.get(keyword, [keyword])
+            has_keyword = any(syn in item["title"] for syn in synonyms)
+            if not has_keyword:
+                print(f"   -> [필터링 스킵] 제목에 관련 키워드가 없어 스킵합니다: '{item['title']}'")
                 continue
                 
             print(f"\nProcessing new article: '{item['title']}'")
