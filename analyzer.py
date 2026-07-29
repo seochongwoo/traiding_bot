@@ -34,6 +34,7 @@ def analyze_news_sentiment(keyword: str, title: str, content: str) -> dict:
 1. 단기 주가에 미치는 영향을 -10 (가장 강력한 악재/폭락)에서 +10 (가장 강력한 호재/폭등) 사이의 정수 점수(score)로 평가하세요. 0은 중립입니다.
 2. 기사의 핵심 내용과 주가 영향 이유를 명확하게 포함하는 3줄 요약(summary)을 작성하세요. 요약은 읽기 쉽도록 줄바꿈(예: - 로 시작하는 각 리스트 형태로 총 3행)을 넣어 작성하십시오.
 3. 관련 주요 키워드(keywords)를 3개에서 5개 사이로 추출하세요.
+4. **중요**: JSON 객체의 `summary` 문자열 값 내부에는 절대로 큰따옴표(예: "레버리지 사태")를 직접 사용하지 마십시오. 따옴표가 필요하다면 반드시 작은따옴표('레버리지 사태')를 사용해야 합니다.
 
 반드시 다음 JSON 스키마를 만족하는 유효한 JSON 형식으로만 정확히 반환해야 합니다:
 {{
@@ -43,7 +44,42 @@ def analyze_news_sentiment(keyword: str, title: str, content: str) -> dict:
 }}
 """
         response = model.generate_content(prompt)
-        result = json.loads(response.text.strip())
+        text = response.text.strip()
+        
+        # Markdown 코드 블록(```json 및 ```) 제거 처리
+        if text.startswith("```"):
+            if text.startswith("```json"):
+                text = text[7:]
+            elif text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+        # JSON 파싱 시도
+        try:
+            result = json.loads(text)
+        except Exception as json_err:
+            print(f"Warning: standard JSON parse failed ({json_err}). Attempting regex recovery...")
+            import re
+            
+            # 정규식을 이용해 구조 복원 시도
+            score_match = re.search(r'"score"\s*:\s*(-?\d+)', text)
+            summary_match = re.search(r'"summary"\s*:\s*"(.*?)"', text, re.DOTALL)
+            keywords_match = re.search(r'"keywords"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            
+            score_val = int(score_match.group(1)) if score_match else 0
+            summary_val = summary_match.group(1) if summary_match else "요약 정보 분석 실패"
+            
+            keywords_val = []
+            if keywords_match:
+                keywords_val = re.findall(r'"([^"]*)"', keywords_match.group(1))
+                
+            result = {
+                "score": score_val,
+                "summary": summary_val,
+                "keywords": keywords_val
+            }
         
         # 타입 및 범위 안정성 처리
         score = int(result.get("score", 0))
