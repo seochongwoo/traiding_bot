@@ -1,0 +1,35 @@
+name: Serverless AI Trading Bot
+
+on:
+  schedule:
+    # 매시간 정각 실행 (UTC 기준 0분 -> KST 매시 정각)
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    # GitHub 웹 UI에서 수동 실행 가능하도록 지원
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip' # pip 캐싱 활성화하여 의존성 설치 속도 극대화
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bot Script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+        run: python main.py

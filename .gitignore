@@ -1,0 +1,14 @@
+# 로컬 환경 변수 파일 (절대 깃허브에 올리지 마세요!)
+.env
+.env.local
+.env.*
+
+# 파이썬 캐시 및 컴파일 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS 관련 임시 파일
+.DS_Store
+Thumbs.db
