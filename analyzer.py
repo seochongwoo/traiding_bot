@@ -15,7 +15,7 @@ def analyze_news_sentiment(keyword: str, title: str, content: str) -> dict:
         
         # 모델 초기화 (속도와 비용이 최적인 gemini-3.5-flash 사용)
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-3.1-flash-lite",
             generation_config={"response_mime_type": "application/json"}
         )
         
