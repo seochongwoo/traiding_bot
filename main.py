@@ -106,8 +106,8 @@ def run_trading_bot():
             else:
                 print(f"No signal triggered. Score {score:+} is within bounds ({SIGNAL_THRESHOLD}).")
 
-            # API 호출 속도 제한 준수 및 안정성을 위해 약간의 슬립
-            time.sleep(1)
+            # Gemini API Free Tier 속도 제한(15 RPM) 준수를 위해 4.5초 슬립 적용
+            time.sleep(4.5)
 
     print("\n==================================================")
     print("Execution Finished Summary:")
