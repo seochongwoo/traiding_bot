@@ -3,3 +3,5 @@ beautifulsoup4
 gspread
 google-generativeai
 python-dotenv
+yfinance
+pandas

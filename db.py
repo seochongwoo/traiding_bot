@@ -34,10 +34,10 @@ def open_worksheet():
         sh = gc.open_by_key(GOOGLE_SPREADSHEET_ID)
         sheet = sh.sheet1
         
-        # 첫 번째 행을 확인하여 비어있다면 헤더 작성
+        # 첫 번째 행을 확인하여 비어있다면 헤더 작성 (RSI, 이격도, MACD 컬럼 추가)
         row1 = sheet.row_values(1)
         if not row1:
-            headers = ["일시", "검색 키워드", "뉴스 제목", "URL", "AI 스코어", "AI 요약", "주요 키워드"]
+            headers = ["일시", "검색 키워드", "뉴스 제목", "URL", "AI 스코어", "AI 요약", "주요 키워드", "RSI", "이격도", "MACD 상태"]
             sheet.append_row(headers)
             
         return sheet
@@ -63,9 +63,9 @@ def fetch_existing_urls(sheet) -> set:
         print(f"Exception while fetching existing URLs: {e}")
         return set()
 
-def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, summary: str, keywords: list) -> bool:
+def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, summary: str, keywords: list, rsi=None, disparity=None, macd_dead_cross=None) -> bool:
     """
-    분석 완료된 뉴스 한 건을 구글 스프레드시트에 행으로 추가합니다.
+    분석 완료된 뉴스 한 건과 차트 보조지표를 구글 스프레드시트에 행으로 추가합니다.
     """
     if not sheet:
         print("Warning: Spreadsheet connection is unavailable. Skipping append.")
@@ -73,7 +73,13 @@ def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: 
         
     try:
         keywords_str = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
-        row = [datetime_str, keyword, title, url, score, summary, keywords_str]
+        
+        # 보조지표 포맷팅
+        rsi_val = round(rsi, 2) if rsi is not None else ""
+        disparity_val = round(disparity, 2) if disparity is not None else ""
+        macd_val = "데드크로스(하락)" if macd_dead_cross is True else ("골든크로스(상승)" if macd_dead_cross is False else "")
+        
+        row = [datetime_str, keyword, title, url, score, summary, keywords_str, rsi_val, disparity_val, macd_val]
         sheet.append_row(row)
         return True
     except Exception as e:

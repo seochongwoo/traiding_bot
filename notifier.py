@@ -2,7 +2,7 @@ import requests
 from datetime import datetime
 from config import DISCORD_WEBHOOK_URL
 
-def send_discord_signal(keyword: str, title: str, url: str, score: int, summary: str, keywords: list) -> bool:
+def send_discord_signal(keyword: str, title: str, url: str, score: int, summary: str, keywords: list, rsi=None, disparity=None, macd_dead_cross=None) -> bool:
     """
     Discord Webhook을 사용하여 주가 영향도 시그널 메시지를 Rich Embed 형태로 전송합니다.
     """
@@ -48,6 +48,19 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
             }
         ]
     }
+
+    # 차트 보조지표 필드 동적 추가
+    if rsi is not None or disparity is not None or macd_dead_cross is not None:
+        rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+        disp_str = f"{disparity:.2f}%" if disparity is not None else "N/A"
+        macd_str = "🔴 데드크로스(하락 우세)" if macd_dead_cross is True else ("🟢 골든크로스(상승 우세)" if macd_dead_cross is False else "N/A")
+        
+        indicator_value = f"📈 **RSI(14)**: `{rsi_str}` (경고: $\\ge 75$)\n⚖️ **이격도(20)**: `{disp_str}` (경고: $\\ge 120\\%$)\n📊 **MACD**: {macd_str}"
+        payload["embeds"][0]["fields"].append({
+            "name": "📊 차트 보조지표 상태 (설거지 방지 통과)",
+            "value": indicator_value,
+            "inline": False
+        })
 
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)

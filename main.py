@@ -1,10 +1,11 @@
 import time
 from datetime import datetime, timedelta
-from config import TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS
+from config import TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS, RSI_HIGH_LIMIT, DISPARITY_LIMIT
 from crawler import fetch_news_list, get_news_content
 from db import open_worksheet, fetch_existing_urls, append_news_record
 from analyzer import analyze_news_sentiment
 from notifier import send_discord_signal
+from chart import get_stock_indicators
 
 def run_trading_bot():
     print("==================================================")
@@ -77,7 +78,13 @@ def run_trading_bot():
             kst_now = datetime.utcnow() + timedelta(hours=9)
             datetime_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # 구글 스프레드시트에 저장
+            # 야후 파이낸스에서 기술적 지표 조회 (RSI, 이격도, MACD)
+            chart_data = get_stock_indicators(keyword)
+            rsi = chart_data["rsi"] if chart_data else None
+            disparity = chart_data["disparity"] if chart_data else None
+            macd_dead_cross = chart_data["macd_dead_cross"] if chart_data else None
+
+            # 구글 스프레드시트에 저장 (보조지표 컬럼 추가)
             saved_to_db = False
             if sheet:
                 saved_to_db = append_news_record(
@@ -88,10 +95,13 @@ def run_trading_bot():
                     url=url_identifier,
                     score=score,
                     summary=summary,
-                    keywords=extracted_keywords
+                    keywords=extracted_keywords,
+                    rsi=rsi,
+                    disparity=disparity,
+                    macd_dead_cross=macd_dead_cross
                 )
                 if saved_to_db:
-                    print("Recorded to Google Sheets successfully.")
+                    print("Recorded to Google Sheets successfully (including chart indicators).")
             
             # 중복 방지를 위해 메모리 상의 URL 세트에도 추가
             existing_urls.add(url_identifier)
@@ -99,17 +109,40 @@ def run_trading_bot():
 
             # 매매 시그널 체크 (임계치 만족 시 Discord 전송)
             if abs(score) >= SIGNAL_THRESHOLD:
-                print(f"Signal detected! Score {score:+} crosses threshold {SIGNAL_THRESHOLD}. Sending Discord alert...")
-                sent = send_discord_signal(
-                    keyword=keyword,
-                    title=item["title"],
-                    url=url_identifier,
-                    score=score,
-                    summary=summary,
-                    keywords=extracted_keywords
-                )
-                if sent:
-                    alerts_sent_count += 1
+                # 매수 호재(score >= 8)인 경우 고점 물림 방지 필터링 적용
+                is_buy_signal = (score >= SIGNAL_THRESHOLD)
+                
+                skip_alert = False
+                skip_reason = []
+                
+                if is_buy_signal and chart_data:
+                    if rsi and rsi >= RSI_HIGH_LIMIT:
+                        skip_alert = True
+                        skip_reason.append(f"RSI 과열 ({rsi:.1f} >= {RSI_HIGH_LIMIT})")
+                    if disparity and disparity >= DISPARITY_LIMIT:
+                        skip_alert = True
+                        skip_reason.append(f"이격도 과열 ({disparity:.1f}% >= {DISPARITY_LIMIT}%)")
+                    if macd_dead_cross:
+                        skip_alert = True
+                        skip_reason.append("MACD 데드크로스(하락 추세)")
+                
+                if skip_alert:
+                    print(f"   -> [설거지 방지 필터 차단] 호재 발생했으나 고점 징후로 알림 생략: {', '.join(skip_reason)}")
+                else:
+                    print(f"Signal detected! Score {score:+} crosses threshold {SIGNAL_THRESHOLD}. Sending Discord alert...")
+                    sent = send_discord_signal(
+                        keyword=keyword,
+                        title=item["title"],
+                        url=url_identifier,
+                        score=score,
+                        summary=summary,
+                        keywords=extracted_keywords,
+                        rsi=rsi,
+                        disparity=disparity,
+                        macd_dead_cross=macd_dead_cross
+                    )
+                    if sent:
+                        alerts_sent_count += 1
             else:
                 print(f"No signal triggered. Score {score:+} is within bounds ({SIGNAL_THRESHOLD}).")
 
