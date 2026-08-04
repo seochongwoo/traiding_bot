@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timedelta
 from config import (
     TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, 
-    KEYWORD_SYNONYMS, RSI_BUY_LIMIT, TICKER_MAP
+    KEYWORD_SYNONYMS, RSI_BUY_LIMIT, DISPARITY_LIMIT, TICKER_MAP
 )
 from crawler import fetch_news_list, get_news_content
 from db import (
@@ -94,13 +94,14 @@ def run_trading_bot():
     print("🔄 Phase 2: Scanning & Entering New Positions")
     print("==================================================")
     
-    news_sheet = open_worksheet("News_Log")
+    # 원래 쓰던 "시트1" 탭에 신규 분석 데이터를 누적합니다.
+    news_sheet = open_worksheet("시트1")
     if not news_sheet:
-        print("Warning: News_Log worksheet is not connected. The bot will run without database logging.")
+        print("Warning: '시트1' worksheet is not connected. The bot will run without database logging.")
         existing_urls = set()
     else:
         existing_urls = fetch_existing_urls(news_sheet)
-        print(f"Loaded {len(existing_urls)} existing URLs from News_Log.")
+        print(f"Loaded {len(existing_urls)} existing URLs from '시트1'.")
 
     new_articles_count = 0
     alerts_sent_count = 0
@@ -152,13 +153,15 @@ def run_trading_bot():
             kst_now = datetime.utcnow() + timedelta(hours=9)
             datetime_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # 야후 파이낸스에서 기술적 지표 조회 (RSI, ATR)
+            # 야후 파이낸스에서 기술적 지표 조회 (RSI, ATR, 이격도, MACD 데드크로스)
             chart_data = get_stock_indicators(keyword)
             rsi = chart_data["rsi"] if chart_data else None
             atr = chart_data["atr"] if chart_data else None
+            disparity = chart_data["disparity"] if chart_data else None
+            macd_dead_cross = chart_data["macd_dead_cross"] if chart_data else None
             current_price = chart_data["current_price"] if chart_data else None
 
-            # 구글 스프레드시트에 저장 (News_Log 기록)
+            # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표를 포함해 기록)
             saved_to_db = False
             if news_sheet:
                 saved_to_db = append_news_record(
@@ -169,10 +172,13 @@ def run_trading_bot():
                     url=url_identifier,
                     score=score,
                     summary=summary,
-                    keywords=extracted_keywords
+                    keywords=extracted_keywords,
+                    rsi=rsi,
+                    disparity=disparity,
+                    macd_dead_cross=macd_dead_cross
                 )
                 if saved_to_db:
-                    print("Recorded to News_Log sheet successfully.")
+                    print("Recorded to '시트1' sheet successfully (including chart indicators).")
             
             existing_urls.add(url_identifier)
             new_articles_count += 1
@@ -185,13 +191,26 @@ def run_trading_bot():
                     print("Warning: Failed to fetch stock indicators. Skipping position entry.")
                     continue
                     
-                # RSI가 50 이하(과매수 아님)인지 확인
-                if rsi <= RSI_BUY_LIMIT:
+                # 설거지 방지 및 매수 강도 필터링 적용 (RSI <= 50, 이격도 < 120%, MACD 데드크로스 아닐 것)
+                skip_buy = False
+                skip_reasons = []
+                
+                if rsi and rsi > RSI_BUY_LIMIT:
+                    skip_buy = True
+                    skip_reasons.append(f"RSI 과열 ({rsi:.2f} > {RSI_BUY_LIMIT})")
+                if disparity and disparity >= DISPARITY_LIMIT:
+                    skip_buy = True
+                    skip_reasons.append(f"이격도 과열 ({disparity:.2f}% >= {DISPARITY_LIMIT}%)")
+                if macd_dead_cross:
+                    skip_buy = True
+                    skip_reasons.append("MACD 데드크로스(하락 추세)")
+                
+                if not skip_buy:
                     # 목표가 및 손절가 계산
                     target_price = current_price + (atr * 3)
                     stop_loss = current_price - (atr * 2)
                     
-                    print(f"RSI Filter Passed: {rsi:.2f} <= {RSI_BUY_LIMIT}. Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
+                    print(f"Filters Passed: Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
                     
                     # 디스코드 채널로 진입 알림 발송 (#일반-알림)
                     sent = send_discord_signal(
@@ -225,7 +244,7 @@ def run_trading_bot():
                             print(f"Successfully recorded new position for {keyword} in Active_Positions.")
                             alerts_sent_count += 1
                 else:
-                    print(f"RSI Filter Blocked: Current RSI {rsi:.2f} > {RSI_BUY_LIMIT}. Skipping position entry (Overbought).")
+                    print(f"BUY Entry Blocked: {', '.join(skip_reasons)}. Skipping position entry.")
             else:
                 print(f"No buy signal triggered. Score {score:+} < {SIGNAL_THRESHOLD}.")
 

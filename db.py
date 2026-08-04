@@ -42,8 +42,8 @@ def open_worksheet(tab_name: str):
         # 비어있으면 헤더 작성
         row1 = sheet.row_values(1)
         if not row1:
-            if tab_name == "News_Log":
-                headers = ["일시", "검색 키워드", "뉴스 제목", "URL", "AI 스코어", "AI 요약", "주요 키워드"]
+            if tab_name == "시트1":
+                headers = ["일시", "검색 키워드", "뉴스 제목", "URL", "AI 스코어", "AI 요약", "주요 키워드", "RSI", "이격도", "MACD 상태"]
             elif tab_name == "Active_Positions":
                 headers = ["진입일자", "종목코드", "종목명", "매수가", "목표가", "손절가", "상태"]
             else:
@@ -59,7 +59,7 @@ def open_worksheet(tab_name: str):
 
 def fetch_existing_urls(sheet) -> set:
     """
-    News_Log 탭의 4번째 열(URL)에 기록된 기존 URL 목록을 수집하여 반환합니다.
+    시트1 탭의 4번째 열(URL)에 기록된 기존 URL 목록을 수집하여 반환합니다.
     """
     if not sheet:
         return set()
@@ -73,16 +73,23 @@ def fetch_existing_urls(sheet) -> set:
         print(f"Exception while fetching existing URLs: {e}")
         return set()
 
-def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, summary: str, keywords: list) -> bool:
+def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, 
+                       summary: str, keywords: list, rsi=None, disparity=None, macd_dead_cross=None) -> bool:
     """
-    분석 완료된 뉴스 한 건을 News_Log 스프레드시트 탭에 행으로 추가합니다.
+    분석 완료된 뉴스 한 건과 보조지표 데이터를 시트1 스프레드시트 탭에 행으로 추가합니다.
     """
     if not sheet:
         return False
         
     try:
         keywords_str = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
-        row = [datetime_str, keyword, title, url, score, summary, keywords_str]
+        
+        # 보조지표 포맷팅
+        rsi_val = round(rsi, 2) if rsi is not None else ""
+        disparity_val = round(disparity, 2) if disparity is not None else ""
+        macd_val = "데드크로스(하락)" if macd_dead_cross is True else ("골든크로스(상승)" if macd_dead_cross is False else "")
+        
+        row = [datetime_str, keyword, title, url, score, summary, keywords_str, rsi_val, disparity_val, macd_val]
         sheet.append_row(row)
         return True
     except Exception as e:
@@ -159,11 +166,11 @@ def add_active_position(sheet, date_str: str, symbol: str, name: str, buy_price:
 if __name__ == "__main__":
     # 로컬 개발 환경에서 스프레드시트 탭 분리 연동 테스트
     print("Testing spreadsheet multi-tab connection...")
-    news_sheet = open_worksheet("News_Log")
+    news_sheet = open_worksheet("시트1")
     pos_sheet = open_worksheet("Active_Positions")
     
     if news_sheet and pos_sheet:
-        print("Success! Both News_Log and Active_Positions tabs are configured.")
+        print("Success! Both 시트1 and Active_Positions tabs are configured.")
         active_pos = fetch_active_positions(pos_sheet)
         print(f"Current active positions count: {len(active_pos)}")
         for pos in active_pos:

@@ -5,7 +5,7 @@ from config import TICKER_MAP
 def get_stock_indicators(keyword: str):
     """
     야후 파이낸스를 통해 해당 키워드 종목의 3개월 일봉 데이터를 조회하여
-    현재가, RSI(14), ATR(14)을 계산해 반환합니다.
+    현재가, RSI(14), ATR(14), 이격도(20), MACD 데드크로스 여부를 계산해 반환합니다.
     """
     if keyword not in TICKER_MAP:
         print(f"Warning: '{keyword}' is not in TICKER_MAP. Skipping chart indicator check.")
@@ -15,7 +15,7 @@ def get_stock_indicators(keyword: str):
     print(f"Fetching chart data for {keyword} ({ticker}) via yfinance...")
 
     try:
-        # MACD, ATR, RSI 계산을 안정적으로 하기 위해 3개월 데이터를 받습니다.
+        # MACD(26), 이격도(20), ATR(14) 계산을 안정적으로 하기 위해 3개월 데이터를 받습니다.
         df = yf.Ticker(ticker).history(period="3mo")
 
         if df.empty or len(df) < 26:
@@ -46,13 +46,30 @@ def get_stock_indicators(keyword: str):
         atr_series = tr.ewm(alpha=1/14, min_periods=14).mean()
         atr = float(atr_series.iloc[-1])
 
+        # 4. 이격도 (20일 기준)
+        sma20 = df['Close'].rolling(window=20).mean()
+        latest_sma20 = float(sma20.iloc[-1])
+        disparity = float((current_price / latest_sma20) * 100)
+
+        # 5. MACD 및 Signal (12, 26, 9)
+        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+
+        latest_macd = float(macd.iloc[-1])
+        latest_signal = float(signal.iloc[-1])
+        macd_dead_cross = bool(latest_macd < latest_signal)
+
         indicators = {
             "current_price": current_price,
             "rsi": rsi,
-            "atr": atr
+            "atr": atr,
+            "disparity": disparity,
+            "macd_dead_cross": macd_dead_cross
         }
 
-        print(f"[{keyword}] Price: {current_price:,.0f} | RSI: {rsi:.2f} | ATR: {atr:.2f}")
+        print(f"[{keyword}] Price: {current_price:,.0f} | RSI: {rsi:.2f} | ATR: {atr:.2f} | Disparity: {disparity:.2f}% | MACD DeadCross: {macd_dead_cross}")
         return indicators
 
     except Exception as e:
