@@ -11,7 +11,7 @@ from db import (
 )
 from analyzer import analyze_news_sentiment
 from notifier import send_discord_signal, send_discord_sell_alert
-from chart import get_stock_indicators
+from chart import get_stock_indicators, check_market_trend
 
 def run_trading_bot():
     print("==================================================")
@@ -93,6 +93,16 @@ def run_trading_bot():
     print("\n==================================================")
     print("🔄 Phase 2: Scanning & Entering New Positions")
     print("==================================================")
+    
+    # 대세 상승장 필터링: KOSPI와 NASDAQ이 모두 20일선 위에 있어야 매수 탐색 진행
+    print("Checking overall market trend index filter...")
+    kospi_ok, nasdaq_ok = check_market_trend()
+    if not (kospi_ok and nasdaq_ok):
+        print(f"🚫 [대세 하락장 차단] KOSPI 20일선 통과: {kospi_ok} | NASDAQ 20일선 통과: {nasdaq_ok}")
+        print("Skipping Phase 2 entirely to prevent buying in a downtrend and save API requests.")
+        return
+        
+    print("✅ [시장 상승세 판정] KOSPI와 NASDAQ이 모두 20일선 위에 있습니다. 신규 종목 탐색을 시작합니다.")
     
     # 원래 쓰던 "시트1" 탭에 신규 분석 데이터를 누적합니다.
     news_sheet = open_worksheet("시트1")

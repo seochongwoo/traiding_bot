@@ -2,8 +2,8 @@ name: Serverless AI Trading Bot
 
 on:
   schedule:
-    # 매시간 정각 실행 (UTC 기준 0분 -> KST 매시 정각)
-    - cron: '0 * * * *'
+    # 매시간 15분 실행 (서버 혼잡을 피하기 위해 15분으로 설정)
+    - cron: '15 * * * *'
   workflow_dispatch:
     # GitHub 웹 UI에서 수동 실행 가능하도록 지원
 
