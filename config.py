@@ -7,7 +7,8 @@ load_dotenv()
 
 # API Keys & Credentials
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_GENERAL = os.getenv("DISCORD_WEBHOOK_GENERAL")
+DISCORD_WEBHOOK_SELL = os.getenv("DISCORD_WEBHOOK_SELL")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 
 # 구글 서비스 계정 JSON 파싱
@@ -46,5 +47,8 @@ TICKER_MAP = {
 # 설거지(고점 물림) 방지 필터 설정값
 RSI_HIGH_LIMIT = 75
 DISPARITY_LIMIT = 120
+
+# 신규 매수 필터 설정값
+RSI_BUY_LIMIT = 50
 
 

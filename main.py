@@ -1,10 +1,16 @@
 import time
 from datetime import datetime, timedelta
-from config import TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS, RSI_HIGH_LIMIT, DISPARITY_LIMIT
+from config import (
+    TARGET_KEYWORDS, SIGNAL_THRESHOLD, MAX_NEWS_PER_KEYWORD, 
+    KEYWORD_SYNONYMS, RSI_BUY_LIMIT, TICKER_MAP
+)
 from crawler import fetch_news_list, get_news_content
-from db import open_worksheet, fetch_existing_urls, append_news_record
+from db import (
+    open_worksheet, fetch_existing_urls, append_news_record,
+    fetch_active_positions, update_position_status, add_active_position
+)
 from analyzer import analyze_news_sentiment
-from notifier import send_discord_signal
+from notifier import send_discord_signal, send_discord_sell_alert
 from chart import get_stock_indicators
 
 def run_trading_bot():
@@ -12,19 +18,90 @@ def run_trading_bot():
     print(f"Starting Serverless AI Trading Bot at {datetime.utcnow() + timedelta(hours=9)} KST")
     print("==================================================")
 
-    # 1. 구글 스프레드시트 열기
-    print("Connecting to Google Sheets...")
-    sheet = open_worksheet()
-    if not sheet:
-        print("Warning: Google Sheets is not connected. The bot will run without database logging.")
+    # --------------------------------------------------
+    # 🔄 Phase 1: 보유 종목 감시 및 청산 (Sell Logic)
+    # --------------------------------------------------
+    print("\n==================================================")
+    print("🔄 Phase 1: Monitoring & Liquidating Active Positions")
+    print("==================================================")
+    
+    pos_sheet = open_worksheet("Active_Positions")
+    if not pos_sheet:
+        print("Warning: Active_Positions worksheet is not available. Skipping Phase 1.")
+    else:
+        active_positions = fetch_active_positions(pos_sheet)
+        print(f"Found {len(active_positions)} active positions to monitor.")
+        
+        for pos in active_positions:
+            keyword = pos["name"]
+            symbol = pos["symbol"]
+            row_num = pos["row_num"]
+            buy_price = pos["buy_price"]
+            target_price = pos["target_price"]
+            stop_loss = pos["stop_loss"]
+            
+            print(f"\nChecking position: {keyword} ({symbol}) | Entry: {buy_price:,.0f} | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
+            
+            # 실시간 주가 데이터 획득
+            chart_data = get_stock_indicators(keyword)
+            if not chart_data:
+                print(f"Warning: Failed to fetch chart data for {keyword}. Skipping.")
+                continue
+                
+            current_price = chart_data["current_price"]
+            print(f"Current price for {keyword}: {current_price:,.0f}")
+            
+            # 청산 조건 감시 (목표가 돌파 또는 손절선 이탈)
+            is_liquidated = False
+            is_profit = False
+            
+            if current_price >= target_price:
+                print(f"🏆 Target hit! current price {current_price:,.0f} >= target {target_price:,.0f}")
+                is_liquidated = True
+                is_profit = True
+            elif current_price <= stop_loss:
+                print(f"🚨 Stop loss hit! current price {current_price:,.0f} <= stop loss {stop_loss:,.0f}")
+                is_liquidated = True
+                is_profit = False
+                
+            if is_liquidated:
+                # 디스코드 채널로 익절/손절 메시지 발송 (#매도-청산-알림)
+                sent = send_discord_sell_alert(
+                    keyword=keyword,
+                    symbol=symbol,
+                    buy_price=buy_price,
+                    sell_price=current_price,
+                    target_price=target_price,
+                    stop_loss=stop_loss,
+                    is_profit=is_profit
+                )
+                
+                # 구글 스프레드시트 상태를 '청산완료'로 수정
+                if sent:
+                    updated = update_position_status(pos_sheet, row_num, "청산완료")
+                    if updated:
+                        print(f"Successfully updated position at row {row_num} to '청산완료'.")
+            else:
+                print("Holding position. Exit conditions not met.")
+                
+            # 과부하 방지 1.5초 대기
+            time.sleep(1.5)
+
+    # --------------------------------------------------
+    # 🔄 Phase 2: 신규 종목 탐색 및 진입 (Buy Logic)
+    # --------------------------------------------------
+    print("\n==================================================")
+    print("🔄 Phase 2: Scanning & Entering New Positions")
+    print("==================================================")
+    
+    news_sheet = open_worksheet("News_Log")
+    if not news_sheet:
+        print("Warning: News_Log worksheet is not connected. The bot will run without database logging.")
         existing_urls = set()
     else:
-        print("Successfully connected to Google Sheets.")
-        # 기존 처리된 뉴스 URL 수집
-        existing_urls = fetch_existing_urls(sheet)
-        print(f"Loaded {len(existing_urls)} existing URLs from Sheet.")
+        existing_urls = fetch_existing_urls(news_sheet)
+        print(f"Loaded {len(existing_urls)} existing URLs from News_Log.")
 
-    # 2. 키워드별 뉴스 탐색 및 분석 진행
     new_articles_count = 0
     alerts_sent_count = 0
 
@@ -37,15 +114,12 @@ def run_trading_bot():
         print(f"Found {len(news_items)} news items for '{keyword}'.")
 
         for item in news_items:
-            # 중복 체크 대상 URL 설정
-            # 네이버 뉴스 상세 링크가 있으면 그것을, 없으면 오리지널 링크를 식별자로 사용
             url_identifier = item["naver_news_link"] if item["naver_news_link"] else item["original_link"]
             
             if url_identifier in existing_urls:
-                # 이미 처리한 기사인 경우 스킵
                 continue
                 
-            # 제목 키워드 필터링 적용 (노이즈 뉴스 제거로 AI API 호출 및 스프레드시트 낭비 방지)
+            # 제목 키워드 필터링 적용
             synonyms = KEYWORD_SYNONYMS.get(keyword, [keyword])
             has_keyword = any(syn in item["title"] for syn in synonyms)
             if not has_keyword:
@@ -55,7 +129,7 @@ def run_trading_bot():
             print(f"\nProcessing new article: '{item['title']}'")
             print(f"URL: {url_identifier}")
             
-            # 본문 내용 가져오기 (네이버 뉴스 링크가 존재하면 본문 파싱, 없으면 검색 스니펫 활용)
+            # 본문 내용 가져오기
             news_content = ""
             if item["naver_news_link"]:
                 print("Crawling full article body from Naver News...")
@@ -78,58 +152,48 @@ def run_trading_bot():
             kst_now = datetime.utcnow() + timedelta(hours=9)
             datetime_str = kst_now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # 야후 파이낸스에서 기술적 지표 조회 (RSI, 이격도, MACD)
+            # 야후 파이낸스에서 기술적 지표 조회 (RSI, ATR)
             chart_data = get_stock_indicators(keyword)
             rsi = chart_data["rsi"] if chart_data else None
-            disparity = chart_data["disparity"] if chart_data else None
-            macd_dead_cross = chart_data["macd_dead_cross"] if chart_data else None
+            atr = chart_data["atr"] if chart_data else None
+            current_price = chart_data["current_price"] if chart_data else None
 
-            # 구글 스프레드시트에 저장 (보조지표 컬럼 추가)
+            # 구글 스프레드시트에 저장 (News_Log 기록)
             saved_to_db = False
-            if sheet:
+            if news_sheet:
                 saved_to_db = append_news_record(
-                    sheet=sheet,
+                    sheet=news_sheet,
                     datetime_str=datetime_str,
                     keyword=keyword,
                     title=item["title"],
                     url=url_identifier,
                     score=score,
                     summary=summary,
-                    keywords=extracted_keywords,
-                    rsi=rsi,
-                    disparity=disparity,
-                    macd_dead_cross=macd_dead_cross
+                    keywords=extracted_keywords
                 )
                 if saved_to_db:
-                    print("Recorded to Google Sheets successfully (including chart indicators).")
+                    print("Recorded to News_Log sheet successfully.")
             
-            # 중복 방지를 위해 메모리 상의 URL 세트에도 추가
             existing_urls.add(url_identifier)
             new_articles_count += 1
 
-            # 매매 시그널 체크 (임계치 만족 시 Discord 전송)
-            if abs(score) >= SIGNAL_THRESHOLD:
-                # 매수 호재(score >= 8)인 경우 고점 물림 방지 필터링 적용
-                is_buy_signal = (score >= SIGNAL_THRESHOLD)
+            # 매수 시그널 발생 조건 검사 (AI score >= 8)
+            if score >= SIGNAL_THRESHOLD:
+                print(f"BUY Signal detected! Score {score:+} >= {SIGNAL_THRESHOLD}.")
                 
-                skip_alert = False
-                skip_reason = []
-                
-                if is_buy_signal and chart_data:
-                    if rsi and rsi >= RSI_HIGH_LIMIT:
-                        skip_alert = True
-                        skip_reason.append(f"RSI 과열 ({rsi:.1f} >= {RSI_HIGH_LIMIT})")
-                    if disparity and disparity >= DISPARITY_LIMIT:
-                        skip_alert = True
-                        skip_reason.append(f"이격도 과열 ({disparity:.1f}% >= {DISPARITY_LIMIT}%)")
-                    if macd_dead_cross:
-                        skip_alert = True
-                        skip_reason.append("MACD 데드크로스(하락 추세)")
-                
-                if skip_alert:
-                    print(f"   -> [설거지 방지 필터 차단] 호재 발생했으나 고점 징후로 알림 생략: {', '.join(skip_reason)}")
-                else:
-                    print(f"Signal detected! Score {score:+} crosses threshold {SIGNAL_THRESHOLD}. Sending Discord alert...")
+                if not chart_data:
+                    print("Warning: Failed to fetch stock indicators. Skipping position entry.")
+                    continue
+                    
+                # RSI가 50 이하(과매수 아님)인지 확인
+                if rsi <= RSI_BUY_LIMIT:
+                    # 목표가 및 손절가 계산
+                    target_price = current_price + (atr * 3)
+                    stop_loss = current_price - (atr * 2)
+                    
+                    print(f"RSI Filter Passed: {rsi:.2f} <= {RSI_BUY_LIMIT}. Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
+                    
+                    # 디스코드 채널로 진입 알림 발송 (#일반-알림)
                     sent = send_discord_signal(
                         keyword=keyword,
                         title=item["title"],
@@ -137,22 +201,41 @@ def run_trading_bot():
                         score=score,
                         summary=summary,
                         keywords=extracted_keywords,
+                        buy_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
                         rsi=rsi,
-                        disparity=disparity,
-                        macd_dead_cross=macd_dead_cross
+                        atr=atr
                     )
-                    if sent:
-                        alerts_sent_count += 1
+                    
+                    # Active_Positions 워크시트에 진입 기록 추가
+                    if sent and pos_sheet:
+                        symbol = TICKER_MAP.get(keyword, "")
+                        added = add_active_position(
+                            sheet=pos_sheet,
+                            date_str=datetime_str,
+                            symbol=symbol,
+                            name=keyword,
+                            buy_price=current_price,
+                            target_price=target_price,
+                            stop_loss=stop_loss,
+                            status="보유중"
+                        )
+                        if added:
+                            print(f"Successfully recorded new position for {keyword} in Active_Positions.")
+                            alerts_sent_count += 1
+                else:
+                    print(f"RSI Filter Blocked: Current RSI {rsi:.2f} > {RSI_BUY_LIMIT}. Skipping position entry (Overbought).")
             else:
-                print(f"No signal triggered. Score {score:+} is within bounds ({SIGNAL_THRESHOLD}).")
+                print(f"No buy signal triggered. Score {score:+} < {SIGNAL_THRESHOLD}.")
 
-            # Gemini API Free Tier 속도 제한(15 RPM) 준수를 위해 4.5초 슬립 적용
+            # API 속도 조절 (무료 티어 RPM 안전 준수)
             time.sleep(4.5)
 
     print("\n==================================================")
     print("Execution Finished Summary:")
     print(f"- Total new articles analyzed: {new_articles_count}")
-    print(f"- Total Discord alerts sent: {alerts_sent_count}")
+    print(f"- Total new positions opened: {alerts_sent_count}")
     print("==================================================")
 
 if __name__ == "__main__":
