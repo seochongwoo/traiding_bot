@@ -7,7 +7,7 @@ from config import (
 from crawler import fetch_news_list, get_news_content
 from db import (
     open_worksheet, fetch_existing_urls, append_news_record,
-    fetch_active_positions, update_position_status, add_active_position
+    fetch_active_positions, liquidate_position, update_position_highest, add_active_position
 )
 from analyzer import analyze_news_sentiment
 from notifier import send_discord_signal, send_discord_sell_alert
@@ -39,6 +39,8 @@ def run_trading_bot():
             buy_price = pos["buy_price"]
             target_price = pos["target_price"]
             stop_loss = pos["stop_loss"]
+            highest_price = pos["highest_price"]
+            highest_rate = pos["highest_rate"]
             
             print(f"\nChecking position: {keyword} ({symbol}) | Entry: {buy_price:,.0f} | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
             
@@ -50,6 +52,13 @@ def run_trading_bot():
                 
             current_price = chart_data["current_price"]
             print(f"Current price for {keyword}: {current_price:,.0f}")
+            
+            # 최고가도달 및 최고가도달률 갱신 검증
+            if current_price > highest_price or highest_price == 0.0:
+                highest_price = current_price
+                highest_rate = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
+                update_position_highest(pos_sheet, row_num, highest_price, highest_rate)
+                print(f"   🏆 New high recorded for {keyword}: {highest_price:,.0f}원 ({highest_rate:+.2f}%)")
             
             # 청산 조건 감시 (목표가 돌파 또는 손절선 이탈)
             is_liquidated = False
@@ -76,11 +85,19 @@ def run_trading_bot():
                     is_profit=is_profit
                 )
                 
-                # 구글 스프레드시트 상태를 '청산완료'로 수정
+                # 구글 스프레드시트 상세 청산 정보 업데이트 및 상태를 '청산완료'로 수정
                 if sent:
-                    updated = update_position_status(pos_sheet, row_num, "청산완료")
+                    return_rate = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
+                    updated = liquidate_position(
+                        sheet=pos_sheet,
+                        row_num=row_num,
+                        close_date=(datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),
+                        close_price=current_price,
+                        reason="익절" if is_profit else "손절",
+                        return_rate=return_rate
+                    )
                     if updated:
-                        print(f"Successfully updated position at row {row_num} to '청산완료'.")
+                        print(f"Successfully liquidated position at row {row_num}.")
             else:
                 print("Holding position. Exit conditions not met.")
                 
@@ -171,7 +188,38 @@ def run_trading_bot():
             macd_dead_cross = chart_data["macd_dead_cross"] if chart_data else None
             current_price = chart_data["current_price"] if chart_data else None
 
-            # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표를 포함해 기록)
+            # 매수 여부 판정 (진입 여부 'Y' / 'N' 결정)
+            entry_yn = "N"
+            skip_buy = False
+            skip_reasons = []
+            target_price = 0.0
+            stop_loss = 0.0
+            
+            if score >= SIGNAL_THRESHOLD:
+                if not chart_data:
+                    skip_buy = True
+                    skip_reasons.append("주가 지표 획득 실패")
+                else:
+                    if rsi and rsi > RSI_BUY_LIMIT:
+                        skip_buy = True
+                        skip_reasons.append(f"RSI 과열 ({rsi:.2f} > {RSI_BUY_LIMIT})")
+                    if disparity and disparity >= DISPARITY_LIMIT:
+                        skip_buy = True
+                        skip_reasons.append(f"이격도 과열 ({disparity:.2f}% >= {DISPARITY_LIMIT}%)")
+                    if macd_dead_cross:
+                        skip_buy = True
+                        skip_reasons.append("MACD 데드크로스(하락 추세)")
+                    if not market_ok:
+                        skip_buy = True
+                        skip_reasons.append(f"대세 하락장 차단 (KOSPI 20일선: {kospi_ok}, NASDAQ 20일선: {nasdaq_ok})")
+                
+                if not skip_buy:
+                    entry_yn = "Y"
+                    if chart_data:
+                        target_price = current_price + (atr * 3)
+                        stop_loss = current_price - (atr * 2)
+
+            # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표와 진입여부를 기록)
             saved_to_db = False
             if news_sheet:
                 saved_to_db = append_news_record(
@@ -185,81 +233,51 @@ def run_trading_bot():
                     keywords=extracted_keywords,
                     rsi=rsi,
                     disparity=disparity,
-                    macd_dead_cross=macd_dead_cross
+                    macd_dead_cross=macd_dead_cross,
+                    entry_yn=entry_yn
                 )
                 if saved_to_db:
-                    print("Recorded to '시트1' sheet successfully (including chart indicators).")
+                    print(f"Recorded to '시트1' sheet successfully. Entry YN: {entry_yn}")
             
             existing_urls.add(url_identifier)
             new_articles_count += 1
 
-            # 매수 시그널 발생 조건 검사 (AI score >= 8)
-            if score >= SIGNAL_THRESHOLD:
-                print(f"BUY Signal detected! Score {score:+} >= {SIGNAL_THRESHOLD}.")
+            # 실제 매수 진입 시 디스코드 전송 및 Active_Positions 추가
+            if entry_yn == "Y":
+                print(f"BUY Entry Triggered for {keyword}! Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
+                # 디스코드 채널로 진입 알림 발송 (#일반-알림)
+                sent = send_discord_signal(
+                    keyword=keyword,
+                    title=item["title"],
+                    url=url_identifier,
+                    score=score,
+                    summary=summary,
+                    keywords=extracted_keywords,
+                    buy_price=current_price,
+                    target_price=target_price,
+                    stop_loss=stop_loss,
+                    rsi=rsi,
+                    atr=atr
+                )
                 
-                if not chart_data:
-                    print("Warning: Failed to fetch stock indicators. Skipping position entry.")
-                    continue
-                    
-                # 설거지 방지 및 매수 강도 필터링 적용 (RSI <= 50, 이격도 < 120%, MACD 데드크로스 아닐 것, 대세 상승장일 것)
-                skip_buy = False
-                skip_reasons = []
-                
-                if rsi and rsi > RSI_BUY_LIMIT:
-                    skip_buy = True
-                    skip_reasons.append(f"RSI 과열 ({rsi:.2f} > {RSI_BUY_LIMIT})")
-                if disparity and disparity >= DISPARITY_LIMIT:
-                    skip_buy = True
-                    skip_reasons.append(f"이격도 과열 ({disparity:.2f}% >= {DISPARITY_LIMIT}%)")
-                if macd_dead_cross:
-                    skip_buy = True
-                    skip_reasons.append("MACD 데드크로스(하락 추세)")
-                if not market_ok:
-                    skip_buy = True
-                    skip_reasons.append(f"대세 하락장 차단 (KOSPI 20일선: {kospi_ok}, NASDAQ 20일선: {nasdaq_ok})")
-                
-                if not skip_buy:
-                    # 목표가 및 손절가 계산
-                    target_price = current_price + (atr * 3)
-                    stop_loss = current_price - (atr * 2)
-                    
-                    print(f"Filters Passed: Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
-                    
-                    # 디스코드 채널로 진입 알림 발송 (#일반-알림)
-                    sent = send_discord_signal(
-                        keyword=keyword,
-                        title=item["title"],
-                        url=url_identifier,
-                        score=score,
-                        summary=summary,
-                        keywords=extracted_keywords,
+                # Active_Positions 워크시트에 진입 기록 추가
+                if sent and pos_sheet:
+                    symbol = TICKER_MAP.get(keyword, "")
+                    added = add_active_position(
+                        sheet=pos_sheet,
+                        date_str=datetime_str,
+                        symbol=symbol,
+                        name=keyword,
                         buy_price=current_price,
                         target_price=target_price,
                         stop_loss=stop_loss,
-                        rsi=rsi,
-                        atr=atr
+                        status="보유중"
                     )
-                    
-                    # Active_Positions 워크시트에 진입 기록 추가
-                    if sent and pos_sheet:
-                        symbol = TICKER_MAP.get(keyword, "")
-                        added = add_active_position(
-                            sheet=pos_sheet,
-                            date_str=datetime_str,
-                            symbol=symbol,
-                            name=keyword,
-                            buy_price=current_price,
-                            target_price=target_price,
-                            stop_loss=stop_loss,
-                            status="보유중"
-                        )
-                        if added:
-                            print(f"Successfully recorded new position for {keyword} in Active_Positions.")
-                            alerts_sent_count += 1
-                else:
-                    print(f"BUY Entry Blocked: {', '.join(skip_reasons)}. Skipping position entry.")
-            else:
-                print(f"No buy signal triggered. Score {score:+} < {SIGNAL_THRESHOLD}.")
+                    if added:
+                        print(f"Successfully recorded new position for {keyword} in Active_Positions.")
+                        alerts_sent_count += 1
+            elif score >= SIGNAL_THRESHOLD and skip_buy:
+                print(f"BUY Entry Blocked: {', '.join(skip_reasons)}. News logged as entry_yn='N'.")
 
             # API 속도 조절 (무료 티어 RPM 안전 준수)
             time.sleep(4.5)
