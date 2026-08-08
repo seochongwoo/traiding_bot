@@ -189,7 +189,7 @@ def run_trading_bot():
             current_price = chart_data["current_price"] if chart_data else None
 
             # 매수 여부 판정 (진입 여부 'Y' / 'N' 결정)
-            entry_yn = "N"
+            entry_yn = "N (점수 미달)"
             skip_buy = False
             skip_reasons = []
             target_price = 0.0
@@ -202,22 +202,24 @@ def run_trading_bot():
                 else:
                     if rsi and rsi > RSI_BUY_LIMIT:
                         skip_buy = True
-                        skip_reasons.append(f"RSI 과열 ({rsi:.2f} > {RSI_BUY_LIMIT})")
+                        skip_reasons.append(f"RSI 과열({rsi:.1f})")
                     if disparity and disparity >= DISPARITY_LIMIT:
                         skip_buy = True
-                        skip_reasons.append(f"이격도 과열 ({disparity:.2f}% >= {DISPARITY_LIMIT}%)")
+                        skip_reasons.append(f"이격도 과열({disparity:.1f}%)")
                     if macd_dead_cross:
                         skip_buy = True
-                        skip_reasons.append("MACD 데드크로스(하락 추세)")
+                        skip_reasons.append("MACD 데드크로스")
                     if not market_ok:
                         skip_buy = True
-                        skip_reasons.append(f"대세 하락장 차단 (KOSPI 20일선: {kospi_ok}, NASDAQ 20일선: {nasdaq_ok})")
+                        skip_reasons.append("대세 하락장")
                 
                 if not skip_buy:
                     entry_yn = "Y"
                     if chart_data:
                         target_price = current_price + (atr * 3)
                         stop_loss = current_price - (atr * 2)
+                else:
+                    entry_yn = f"N ({', '.join(skip_reasons)})"
 
             # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표와 진입여부를 기록)
             saved_to_db = False
