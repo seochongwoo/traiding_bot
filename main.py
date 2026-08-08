@@ -221,7 +221,7 @@ def run_trading_bot():
                 else:
                     entry_yn = f"N ({', '.join(skip_reasons)})"
 
-            # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표와 진입여부를 기록)
+            # 구글 스프레드시트에 저장 ("시트1" 탭에 보조지표, 진입가기준, 진입여부를 기록)
             saved_to_db = False
             if news_sheet:
                 saved_to_db = append_news_record(
@@ -236,10 +236,11 @@ def run_trading_bot():
                     rsi=rsi,
                     disparity=disparity,
                     macd_dead_cross=macd_dead_cross,
+                    entry_price=current_price,
                     entry_yn=entry_yn
                 )
                 if saved_to_db:
-                    print(f"Recorded to '시트1' sheet successfully. Entry YN: {entry_yn}")
+                    print(f"Recorded to '시트1' sheet successfully. Entry Price: {current_price:,.0f} | Entry YN: {entry_yn}")
             
             existing_urls.add(url_identifier)
             new_articles_count += 1

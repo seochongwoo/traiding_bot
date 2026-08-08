@@ -46,7 +46,7 @@ def open_worksheet(tab_name: str):
                 headers = [
                     "일시", "검색 키워드", "뉴스 제목", "URL", "AI 스코어", 
                     "AI 요약", "주요 키워드", "RSI", "이격도", "MACD 상태", 
-                    "진입여부", "1일후수익률", "3일후수익률", "5일후수익률", "최종결과"
+                    "진입가기준", "진입여부", "1일후수익률", "3일후수익률", "5일후수익률", "최종결과"
                 ]
             elif tab_name == "Active_Positions":
                 headers = [
@@ -83,9 +83,9 @@ def fetch_existing_urls(sheet) -> set:
 
 def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, 
                        summary: str, keywords: list, rsi=None, disparity=None, macd_dead_cross=None, 
-                       entry_yn: str = "N") -> bool:
+                       entry_price=None, entry_yn: str = "N") -> bool:
     """
-    분석 완료된 뉴스 한 건과 보조지표 및 진입여부 데이터를 시트1 스프레드시트 탭에 행으로 추가합니다.
+    분석 완료된 뉴스 한 건과 보조지표, 진입기준가 및 진입여부 데이터를 시트1 스프레드시트 탭에 행으로 추가합니다.
     """
     if not sheet:
         return False
@@ -97,12 +97,13 @@ def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: 
         rsi_val = round(rsi, 2) if rsi is not None else ""
         disparity_val = round(disparity, 2) if disparity is not None else ""
         macd_val = "데드크로스(하락)" if macd_dead_cross is True else ("골든크로스(상승)" if macd_dead_cross is False else "")
+        entry_price_val = round(entry_price, 2) if entry_price is not None else ""
         
-        # 진입여부(Col 11) 추가, 1일/3일/5일 수익률(Col 12-14) 및 최종결과(Col 15)는 빈칸 설정
+        # 진입가기준(Col 11) 및 진입여부(Col 12) 추가, 1일/3일/5일 수익률(Col 13-15) 및 최종결과(Col 16)는 빈칸 설정
         row = [
             datetime_str, keyword, title, url, score, 
             summary, keywords_str, rsi_val, disparity_val, macd_val, 
-            entry_yn, "", "", "", ""
+            entry_price_val, entry_yn, "", "", "", ""
         ]
         sheet.append_row(row)
         return True
