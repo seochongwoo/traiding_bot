@@ -88,10 +88,11 @@ def run_performance_tracking():
         if buy_price > 0 and (not r1 or not r3 or not r5):
             print(f"\n[Row {idx}] Tracking performance for {keyword} ({ticker}) | Entry Price: {buy_price:,.0f}원...")
             
-            # yfinance로 해당 날짜 이후 15일간의 데이터 획득
+            # yfinance로 해당 날짜 이전 5일부터 시작해 넉넉하게 20일간의 데이터 획득 (주말/공휴일 대응)
             try:
-                start_date = entry_dt.strftime("%Y-%m-%d")
-                df = yf.Ticker(ticker).history(start=start_date, period="15d")
+                start_search_dt = entry_dt - timedelta(days=5)
+                start_date = start_search_dt.strftime("%Y-%m-%d")
+                df = yf.Ticker(ticker).history(start=start_date, period="20d")
                 df = df.dropna(subset=['Close'])
 
                 if not df.empty and len(df) > 0:
@@ -99,10 +100,10 @@ def run_performance_tracking():
                     history_dates = df.index.strftime("%Y-%m-%d").tolist()
                     
                     entry_date_only = entry_date_str.split(" ")[0]
-                    # 진입일에 해당하는 인덱스 찾기
+                    # 진입일에 해당하는 인덱스 찾기 (진입일 이하인 가장 최신 영업일을 기준으로 설정)
                     entry_idx = -1
-                    for i, d_str in enumerate(history_dates):
-                        if d_str >= entry_date_only:
+                    for i in range(len(history_dates) - 1, -1, -1):
+                        if history_dates[i] <= entry_date_only:
                             entry_idx = i
                             break
                     
