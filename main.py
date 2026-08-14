@@ -75,7 +75,7 @@ def run_trading_bot():
                 
             if is_liquidated:
                 # 디스코드 채널로 익절/손절 메시지 발송 (#매도-청산-알림)
-                sent = send_discord_sell_alert(
+                send_discord_sell_alert(
                     keyword=keyword,
                     symbol=symbol,
                     buy_price=buy_price,
@@ -85,8 +85,8 @@ def run_trading_bot():
                     is_profit=is_profit
                 )
                 
-                # 구글 스프레드시트 상세 청산 정보 업데이트 및 상태를 '청산완료'로 수정
-                if sent:
+                # 구글 스프레드시트 상세 청산 정보 업데이트 및 상태를 '청산완료'로 수정 (디스코드 전송 실패 여부와 독립 작동)
+                if pos_sheet:
                     return_rate = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
                     updated = liquidate_position(
                         sheet=pos_sheet,
@@ -249,7 +249,7 @@ def run_trading_bot():
             if entry_yn == "Y":
                 print(f"BUY Entry Triggered for {keyword}! Calculated Target: {target_price:,.0f} | Stop Loss: {stop_loss:,.0f}")
                 # 디스코드 채널로 진입 알림 발송 (#일반-알림)
-                sent = send_discord_signal(
+                send_discord_signal(
                     keyword=keyword,
                     title=item["title"],
                     url=url_identifier,
@@ -263,8 +263,8 @@ def run_trading_bot():
                     atr=atr
                 )
                 
-                # Active_Positions 워크시트에 진입 기록 추가
-                if sent and pos_sheet:
+                # Active_Positions 워크시트에 진입 기록 추가 (디스코드 전송 성공 여부와 독자 작동)
+                if pos_sheet:
                     symbol = TICKER_MAP.get(keyword, "")
                     added = add_active_position(
                         sheet=pos_sheet,
