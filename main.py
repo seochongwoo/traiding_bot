@@ -130,6 +130,11 @@ def run_trading_bot():
         existing_urls = fetch_existing_urls(news_sheet)
         print(f"Loaded {len(existing_urls)} existing URLs from '시트1'.")
 
+    # Active_Positions 워크시트에서 현재 '보유중' 상태인 종목 파악 (중복 진입 방지)
+    active_positions = fetch_active_positions(pos_sheet) if pos_sheet else []
+    holding_keywords = {pos["name"] for pos in active_positions if pos["status"] == "보유중"}
+    holding_symbols = {pos["symbol"] for pos in active_positions if pos["status"] == "보유중"}
+
     new_articles_count = 0
     alerts_sent_count = 0
 
@@ -200,6 +205,10 @@ def run_trading_bot():
                     skip_buy = True
                     skip_reasons.append("주가 지표 획득 실패")
                 else:
+                    # 중복 진입 방지 체크
+                    if keyword in holding_keywords or TICKER_MAP.get(keyword, "") in holding_symbols:
+                        skip_buy = True
+                        skip_reasons.append("이미 보유중")
                     if rsi and rsi > RSI_BUY_LIMIT:
                         skip_buy = True
                         skip_reasons.append(f"RSI 과열({rsi:.1f})")
@@ -216,8 +225,18 @@ def run_trading_bot():
                 if not skip_buy:
                     entry_yn = "Y"
                     if chart_data:
-                        target_price = current_price + (atr * 3)
-                        stop_loss = current_price - (atr * 2)
+                        # 리스크 관리형 변동성 비율 계산 (목표가 Max +5.0% / 손절가 Max -3.0% 상한 제한)
+                        raw_target_pct = (atr * 1.0 / current_price) * 100
+                        target_pct = max(2.5, min(raw_target_pct, 5.0))
+                        stop_pct = max(1.5, min(target_pct * 0.6, 3.0))
+                        
+                        target_price = round(current_price * (1 + target_pct / 100))
+                        stop_loss = round(current_price * (1 - stop_pct / 100))
+                        
+                        # 신규 보유 목록 집합 업데이트하여 동일 루프 내 재진입 방지
+                        holding_keywords.add(keyword)
+                        if TICKER_MAP.get(keyword, ""):
+                            holding_symbols.add(TICKER_MAP[keyword])
                 else:
                     entry_yn = f"N ({', '.join(skip_reasons)})"
 
