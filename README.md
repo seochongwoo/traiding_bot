@@ -3,6 +3,10 @@
 > **GitHub Actions 기반 24/7 무중단 서버리스 퀀트/AI 자동 트레이딩 봇**  
 > 실시간 네이버 뉴스 크롤링 + Google Gemini AI 감성 분석 + 야후 파이낸스 기술적 보조지표 + 구글 스프레드시트 DB + 디스코드 알림을 결합한 한국 주식 트레이딩 시스템입니다.
 
+> [!NOTE]  
+> 📊 **[현재까지 누적 수익률 분석 및 구조적 문제점 보고서 (docs/PERFORMANCE_AND_ISSUES.md)](docs/PERFORMANCE_AND_ISSUES.md)**  
+> 8~10월 모의투자 실거래 9건에 대한 표면 성과(77.8%, +54.2%) vs 장외 체결 착시(Look-Ahead Bias) 분리 분석, 6주간 거래 공백(Filter Starvation) 등 규명된 문제점 및 해결책을 정리한 공식 문서입니다.
+
 ---
 
 ## 📌 주요 특징 (Key Features)
