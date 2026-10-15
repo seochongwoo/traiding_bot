@@ -3,7 +3,8 @@ from datetime import datetime
 from config import DISCORD_WEBHOOK_GENERAL, DISCORD_WEBHOOK_SELL
 
 def send_discord_signal(keyword: str, title: str, url: str, score: int, summary: str, keywords: list, 
-                        buy_price: float, target_price: float, stop_loss: float, rsi: float, atr: float) -> bool:
+                        buy_price: float, target_price: float, stop_loss: float, rsi: float, atr: float,
+                        track: str = "A") -> bool:
     """
     DISCORD_WEBHOOK_GENERAL 채널로 주가 뉴스 분석 시그널 및 매수 진입 카드를 발송합니다.
     """
@@ -11,8 +12,12 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
         print("Warning: DISCORD_WEBHOOK_GENERAL is not configured. Skipping alert.")
         return False
 
-    color = 3066993 # 녹색 계열 (#2ECC71)
-    signal_type = "🟢 [AI 뉴스 분석 & 매수 진입 추천]"
+    if track == "B":
+        color = 3447003  # 파란색 계열 (#3498DB)
+        signal_type = "🔵 [AI 역발상 과매도 매수 진입 - 트랙 B]"
+    else:
+        color = 3066993  # 녹색 계열 (#2ECC71)
+        signal_type = "🟢 [AI 모멘텀 돌파 매수 진입 - 트랙 A]"
     
     keywords_str = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
     
@@ -25,12 +30,12 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
                 "fields": [
                     {
                         "name": "💰 매수 정보 설정",
-                        "value": f"💵 **추천 진입가**: `{buy_price:,.0f}원`\n🎯 **목표가(상한)**: `{target_price:,.0f}원`\n🛡️ **손절가(하한)**: `{stop_loss:,.0f}원`",
+                        "value": f"💵 **체결가**: `{buy_price:,.0f}원`\n🎯 **목표가(상한)**: `{target_price:,.0f}원`\n🛡️ **손절가(하한)**: `{stop_loss:,.0f}원`",
                         "inline": False
                     },
                     {
-                        "name": "📈 보조지표 상태 (설거지 방지 및 필터 통과)",
-                        "value": f"⚡ **RSI(14)**: `{rsi:.2f}` (기준: 50 이하)\n📊 **ATR(14)**: `{atr:.2f}` (변동성 범위)",
+                        "name": "📈 보조지표 상태",
+                        "value": f"⚡ **RSI(14)**: `{rsi:.2f}` (트랙 {track})\n📊 **ATR(14)**: `{atr:.2f}`",
                         "inline": False
                     },
                     {
@@ -51,7 +56,7 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
                 ],
                 "timestamp": datetime.utcnow().isoformat() + "Z",
                 "footer": {
-                    "text": "Serverless AI Trading Bot - Buy Phase"
+                    "text": f"Serverless AI Trading Bot - Track {track}"
                 }
             }
         ]
@@ -70,19 +75,29 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
         return False
 
 def send_discord_sell_alert(keyword: str, symbol: str, buy_price: float, sell_price: float, 
-                            target_price: float, stop_loss: float, is_profit: bool) -> bool:
+                            target_price: float, stop_loss: float, is_profit: bool,
+                            reason_str: str = "") -> bool:
     """
-    DISCORD_WEBHOOK_SELL 채널로 포지션 청산(익절/손절) 메시지를 발송합니다.
+    DISCORD_WEBHOOK_SELL 채널로 포지션 청산(익절/손절/본절) 메시지를 발송합니다.
     """
     if not DISCORD_WEBHOOK_SELL:
         print("Warning: DISCORD_WEBHOOK_SELL is not configured. Skipping alert.")
         return False
 
-    # 익절은 녹색 계열 (#2ECC71), 손절은 적색 계열 (#E74C3C)
-    color = 3066993 if is_profit else 15158332
-    emoji = "🟢" if is_profit else "🚨"
+    if reason_str == "본절":
+        color = 16776960  # 노란색 (#FFFF00)
+        emoji = "🟡"
+        reason = "본절 스탑 발동 (수수료 보전 청산)"
+    elif is_profit:
+        color = 3066993   # 녹색 (#2ECC71)
+        emoji = "🟢"
+        reason = "목표가 돌파 (익절 완료)"
+    else:
+        color = 15158332  # 적색 (#E74C3C)
+        emoji = "🚨"
+        reason = "손절선 이탈 (손절 완료)"
+        
     title_str = f"{emoji} [포지션 청산 완료] {keyword} ({symbol})"
-    reason = "목표가 돌파 (익절 완료)" if is_profit else "손절선 이탈 (손절 완료)"
     
     # 수익률 계산
     return_rate = ((sell_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0

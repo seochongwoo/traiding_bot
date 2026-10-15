@@ -22,8 +22,26 @@ def get_stock_indicators(keyword: str):
             print(f"Warning: Not enough data points fetched for {ticker} (Length: {len(df) if df is not None else 0}).")
             return None
 
-        # 1. 현재가 (마지막 영업일 종가)
-        current_price = float(df['Close'].iloc[-1])
+        # 1. 실시간 현재가 획득 (fast_info 및 intraday 1m 우선 사용으로 과거 일봉 지연 왜곡 방지)
+        t_obj = yf.Ticker(ticker)
+        current_price = None
+        try:
+            fast_price = t_obj.fast_info.last_price
+            if fast_price is not None and fast_price > 0:
+                current_price = float(fast_price)
+        except Exception as e:
+            print(f"Warning: fast_info fetch failed for {ticker}: {e}")
+
+        if current_price is None or current_price <= 0:
+            try:
+                df_1m = t_obj.history(period="1d", interval="1m")
+                if not df_1m.empty:
+                    current_price = float(df_1m['Close'].iloc[-1])
+            except Exception as e:
+                print(f"Warning: 1m intraday fetch failed for {ticker}: {e}")
+
+        if current_price is None or current_price <= 0:
+            current_price = float(df['Close'].iloc[-1])
 
         # 2. RSI (14일 기준, 와일더 지수이동평균 방식)
         delta = df['Close'].diff()
@@ -117,6 +135,63 @@ def check_market_trend():
             
     return results.get("KOSPI", True), results.get("NASDAQ", True)
 
+def get_intraday_bars(keyword: str, since_dt=None):
+    """
+    해당 종목의 최근 5분봉 데이터를 조회하여 (open, high, low, close) 튜플 리스트를 시간순으로 반환합니다.
+    since_dt가 전달되면 그 시각 이후의 봉만 필터링합니다.
+    """
+    if keyword not in TICKER_MAP:
+        return []
+    ticker = TICKER_MAP[keyword]
+    try:
+        df = yf.Ticker(ticker).history(period="5d", interval="5m")
+        if df.empty:
+            return []
+        df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+        if since_dt is not None:
+            # since_dt tz 처리
+            if since_dt.tzinfo is None:
+                # KST 가정
+                import datetime as dt_mod
+                kst = dt_mod.timezone(dt_mod.timedelta(hours=9))
+                since_dt = since_dt.replace(tzinfo=kst)
+            df = df[df.index > since_dt]
+        bars = []
+        for _, row in df.iterrows():
+            bars.append((float(row['Open']), float(row['High']), float(row['Low']), float(row['Close'])))
+        return bars
+    except Exception as e:
+        print(f"Warning: Failed to fetch intraday bars for {keyword}: {e}")
+        return []
+
+def get_today_open(keyword: str):
+    """
+    해당 종목의 오늘 정규장 시초가(Open)를 조회합니다. 없으면 None 반환.
+    """
+    if keyword not in TICKER_MAP:
+        return None
+    ticker = TICKER_MAP[keyword]
+    try:
+        t = yf.Ticker(ticker)
+        # fast_info open이 있을 경우
+        try:
+            op = getattr(t.fast_info, 'open', None)
+            if op and op > 0:
+                return float(op)
+        except Exception:
+            pass
+        # 1일봉에서 Open 조회
+        df = t.history(period="1d", interval="1m")
+        if not df.empty:
+            return float(df['Open'].iloc[0])
+        df_d = t.history(period="5d")
+        if not df_d.empty:
+            return float(df_d['Open'].iloc[-1])
+        return None
+    except Exception as e:
+        print(f"Warning: Failed to fetch today open for {keyword}: {e}")
+        return None
+
 if __name__ == "__main__":
     # 로컬 독립형 모듈 테스트
     print("Testing chart indicators...")
@@ -125,3 +200,6 @@ if __name__ == "__main__":
     print("\nTesting market trend check...")
     kospi_ok, nasdaq_ok = check_market_trend()
     print(f"KOSPI OK: {kospi_ok} | NASDAQ OK: {nasdaq_ok} | Combined: {kospi_ok and nasdaq_ok}")
+    print("\nTesting intraday bars...")
+    bars = get_intraday_bars("삼성전자")
+    print(f"Fetched {len(bars)} 5m bars. Last bar: {bars[-1] if bars else None}")

@@ -52,7 +52,8 @@ def open_worksheet(tab_name: str):
                 headers = [
                     "진입일자", "종목코드", "종목명", "매수가", "목표가", 
                     "손절가", "상태", "청산일자", "청산가", "청산사유", 
-                    "수익률(%)", "최고가도달", "최고가도달률(%)"
+                    "수익률(%)", "최고가도달", "최고가도달률(%)",
+                    "시그널가", "진입트랙", "최종점검시각", "비고"
                 ]
             else:
                 headers = []
@@ -111,102 +112,174 @@ def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: 
         print(f"Exception while appending news record to sheet: {e}")
         return False
 
-def fetch_active_positions(sheet) -> list:
+def col_to_letter(col_idx: int) -> str:
+    """1-indexed 열 번호를 Excel 열 문자(A, B, ..., Z, AA, AB...)로 변환합니다."""
+    result = ""
+    while col_idx > 0:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+def batch_update_position(sheet, row_num: int, col_dict: dict) -> bool:
     """
-    Active_Positions 탭에서 현재 '보유중' 상태인 종목 리스트를 가져옵니다.
-    각 항목은 구글 시트 행 번호(row_num, 1-indexed) 및 최고가 정보를 포함합니다.
+    한 행의 여러 열을 단 1회의 Google Sheets API 호출로 업데이트합니다.
+    col_dict: {열번호(1-indexed): 값}
+    """
+    if not sheet or not col_dict:
+        return False
+    try:
+        data = []
+        for col_idx, val in col_dict.items():
+            col_letter = col_to_letter(col_idx)
+            cell_range = f"{col_letter}{row_num}"
+            data.append({"range": cell_range, "values": [[val]]})
+        sheet.batch_update(data)
+        return True
+    except Exception as e:
+        print(f"Exception during batch_update_position at row {row_num}: {e}")
+        return False
+
+def append_news_records(sheet, rows: list) -> bool:
+    """
+    여러 건의 뉴스 분석 레코드를 단 1회의 호출로 스프레드시트에 추가합니다.
+    """
+    if not sheet or not rows:
+        return False
+    try:
+        sheet.append_rows(rows)
+        return True
+    except Exception as e:
+        print(f"Exception while append_news_records: {e}")
+        return False
+
+def fetch_recent_titles(sheet, keyword: str, hours: int = 12) -> list:
+    """
+    시트1에서 최근 N시간 내에 수집된 해당 키워드의 뉴스 제목 목록을 반환합니다 (의미 중복 필터링용).
+    """
+    if not sheet:
+        return []
+    try:
+        from datetime import datetime, timedelta, timezone
+        kst = timezone(timedelta(hours=9))
+        cutoff = datetime.now(timezone.utc).astimezone(kst) - timedelta(hours=hours)
+        all_vals = sheet.get_all_values()
+        if len(all_vals) <= 1:
+            return []
+        
+        recent_titles = []
+        for row in reversed(all_vals[1:]):
+            if len(row) < 3:
+                continue
+            date_str = row[0].strip()
+            kw = row[1].strip()
+            title = row[2].strip()
+            if kw != keyword:
+                continue
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=kst)
+                if dt < cutoff:
+                    break
+                recent_titles.append(title)
+            except ValueError:
+                continue
+        return recent_titles
+    except Exception as e:
+        print(f"Warning: Failed to fetch recent titles: {e}")
+        return []
+
+def fetch_all_positions(sheet) -> list:
+    """
+    Active_Positions 탭에서 모든 행(상태 무관)을 가져옵니다.
+    진입대기, 보유중, 청산완료를 모두 포함하여 쿨다운 및 대기 주문 체결에 활용합니다.
     """
     positions = []
     if not sheet:
         return positions
-        
     try:
         all_rows = sheet.get_all_values()
         if len(all_rows) <= 1:
             return positions
-            
         headers = all_rows[0]
-        # 헤더 아래 데이터 행 순회 (2번째 행부터 데이터 시작)
         for idx, row in enumerate(all_rows[1:], start=2):
-            # 행 데이터 패딩 처리
-            while len(row) < len(headers):
+            while len(row) < 17:
                 row.append("")
-                
-            status = row[6].strip() if len(row) > 6 else ""
-            if status == "보유중":
-                # 최고가 정보 로드 (Col 12, 13)
-                highest_price = float(row[11]) if (len(row) > 11 and row[11]) else 0.0
-                highest_rate = float(row[12]) if (len(row) > 12 and row[12]) else 0.0
-                
-                positions.append({
-                    "row_num": idx,
-                    "date": row[0],
-                    "symbol": row[1],
-                    "name": row[2],
-                    "buy_price": float(row[3]) if row[3] else 0.0,
-                    "target_price": float(row[4]) if row[4] else 0.0,
-                    "stop_loss": float(row[5]) if row[5] else 0.0,
-                    "status": status,
-                    "highest_price": highest_price,
-                    "highest_rate": highest_rate
-                })
+            positions.append({
+                "row_num": idx,
+                "date": row[0].strip(),
+                "symbol": row[1].strip(),
+                "name": row[2].strip(),
+                "buy_price": float(row[3]) if row[3] else 0.0,
+                "target_price": float(row[4]) if row[4] else 0.0,
+                "stop_loss": float(row[5]) if row[5] else 0.0,
+                "status": row[6].strip(),
+                "close_date": row[7].strip(),
+                "close_price": float(row[8]) if row[8] else 0.0,
+                "reason": row[9].strip(),
+                "return_rate": float(row[10]) if row[10] else 0.0,
+                "highest_price": float(row[11]) if row[11] else 0.0,
+                "highest_rate": float(row[12]) if row[12] else 0.0,
+                "signal_price": float(row[13]) if row[13] else 0.0,
+                "track": row[14].strip(),
+                "last_checked": row[15].strip(),
+                "note": row[16].strip()
+            })
         return positions
     except Exception as e:
-        print(f"Exception while fetching active positions: {e}")
+        print(f"Exception while fetching all positions: {e}")
         return positions
+
+def fetch_active_positions(sheet) -> list:
+    """
+    Active_Positions 탭에서 현재 '보유중' 상태인 종목 리스트를 가져옵니다.
+    """
+    all_pos = fetch_all_positions(sheet)
+    return [p for p in all_pos if p["status"] == "보유중"]
 
 def liquidate_position(sheet, row_num: int, close_date: str, close_price: float, reason: str, return_rate: float) -> bool:
     """
-    포지션 청산 시 관련 정보(청산일자, 청산가, 청산사유, 수익률)를 모두 입력하고 상태를 '청산완료'로 변경합니다.
+    포지션 청산 시 관련 정보를 단 1회의 batch_update로 입력하고 상태를 '청산완료'로 변경합니다.
     """
-    if not sheet:
-        return False
-        
-    try:
-        # Col 7: 상태 = "청산완료"
-        sheet.update_cell(row_num, 7, "청산완료")
-        # Col 8: 청산일자 = close_date
-        sheet.update_cell(row_num, 8, close_date)
-        # Col 9: 청산가 = close_price
-        sheet.update_cell(row_num, 9, close_price)
-        # Col 10: 청산사유 = reason
-        sheet.update_cell(row_num, 10, reason)
-        # Col 11: 수익률(%) = return_rate
-        sheet.update_cell(row_num, 11, round(return_rate, 2))
-        return True
-    except Exception as e:
-        print(f"Exception while liquidating position at row {row_num}: {e}")
-        return False
+    return batch_update_position(sheet, row_num, {
+        7: "청산완료",
+        8: close_date,
+        9: round(close_price),
+        10: reason,
+        11: round(return_rate, 2),
+        16: close_date
+    })
 
-def update_position_highest(sheet, row_num: int, highest_price: float, highest_rate: float) -> bool:
+def update_position_highest(sheet, row_num: int, highest_price: float, highest_rate: float, last_checked: str = "") -> bool:
     """
-    모니터링 과정에서 관측된 최고가 및 최고가도달률을 업데이트합니다.
+    최고가 및 최고가도달률을 업데이트합니다.
     """
-    if not sheet:
-        return False
-        
-    try:
-        # Col 12: 최고가도달 = highest_price
-        sheet.update_cell(row_num, 12, highest_price)
-        # Col 13: 최고가도달률(%) = highest_rate
-        sheet.update_cell(row_num, 13, round(highest_rate, 2))
-        return True
-    except Exception as e:
-        print(f"Exception during position highest price update at row {row_num}: {e}")
-        return False
+    update_data = {
+        12: round(highest_price),
+        13: round(highest_rate, 2)
+    }
+    if last_checked:
+        update_data[16] = last_checked
+    return batch_update_position(sheet, row_num, update_data)
 
 def add_active_position(sheet, date_str: str, symbol: str, name: str, buy_price: float, 
-                        target_price: float, stop_loss: float, status: str = "보유중") -> bool:
+                        target_price: float, stop_loss: float, status: str = "보유중",
+                        signal_price: float = 0.0, track: str = "A", note: str = "") -> bool:
     """
-    새로 진입(매수)한 종목 정보를 Active_Positions 탭에 행으로 추가합니다.
-    새로 추가된 컬럼은 빈 값으로 시작합니다.
+    새로 진입/대기하는 종목 정보를 Active_Positions 탭에 행으로 추가합니다.
     """
     if not sheet:
         return False
-        
     try:
-        # 진입일자 | 종목코드 | 종목명 | 매수가 | 목표가 | 손절가 | 상태 | 청산일자 | 청산가 | 청산사유 | 수익률(%) | 최고가도달 | 최고가도달률(%)
-        row = [date_str, symbol, name, buy_price, target_price, stop_loss, status, "", "", "", "", buy_price, 0.0]
+        # 17개 컬럼 매핑:
+        # 진입일자 | 종목코드 | 종목명 | 매수가 | 목표가 | 손절가 | 상태 | 청산일자 | 청산가 | 청산사유 | 수익률(%) | 최고가도달 | 최고가도달률(%) | 시그널가 | 진입트랙 | 최종점검시각 | 비고
+        hp = buy_price if status == "보유중" else 0.0
+        row = [
+            date_str, symbol, name, round(buy_price) if buy_price else "",
+            round(target_price) if target_price else "", round(stop_loss) if stop_loss else "",
+            status, "", "", "", "",
+            round(hp) if hp else "", 0.0 if status == "보유중" else "",
+            round(signal_price) if signal_price else round(buy_price),
+            track, date_str, note
+        ]
         sheet.append_row(row)
         return True
     except Exception as e:

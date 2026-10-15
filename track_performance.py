@@ -22,7 +22,7 @@ def run_performance_tracking():
     active_positions = []
     if pos_sheet:
         try:
-            all_pos_rows = pos_sheet.get_all_values()
+            all_pos_rows = pos_sheet.get_values()
             if len(all_pos_rows) > 1:
                 headers = all_pos_rows[0]
                 for idx, row in enumerate(all_pos_rows[1:], start=2):
@@ -42,7 +42,7 @@ def run_performance_tracking():
 
     # 3. 뉴스 로그 전체 로드
     try:
-        all_news_rows = news_sheet.get_all_values()
+        all_news_rows = news_sheet.get_values()
     except Exception as e:
         print(f"Error: Failed to fetch news rows: {e}")
         return
@@ -92,7 +92,7 @@ def run_performance_tracking():
             try:
                 start_search_dt = entry_dt - timedelta(days=5)
                 start_date = start_search_dt.strftime("%Y-%m-%d")
-                df = yf.Ticker(ticker).history(start=start_date, period="20d")
+                df = yf.Ticker(ticker).history(start=start_date, period="20d", auto_adjust=False)
                 df = df.dropna(subset=['Close'])
 
                 if not df.empty and len(df) > 0:
@@ -108,25 +108,30 @@ def run_performance_tracking():
                             break
                     
                     if entry_idx != -1:
-                        # 1일후 수익률 (i + 1)
+                        def format_return(ret: float, max_normal: float) -> str:
+                            if abs(ret) > max_normal:
+                                return f"검증필요({ret:+.2f}%)"
+                            return f"{ret:+.2f}%"
+
+                        # 1일후 수익률 (i + 1) - 상한가 30% 초과는 검증필요로 표시
                         if not r1 and (entry_idx + 1 < len(history_closes)):
                             c1 = history_closes[entry_idx + 1]
                             ret1 = ((c1 - buy_price) / buy_price) * 100
-                            cells_to_update.append(Cell(row=idx, col=13, value=f"{ret1:+.2f}%"))
+                            cells_to_update.append(Cell(row=idx, col=13, value=format_return(ret1, 30.0)))
                             print(f"   - 1영업일 후 ({history_dates[entry_idx + 1]}): {c1:,.0f}원 ({ret1:+.2f}%)")
                         
                         # 3일후 수익률 (i + 3)
                         if not r3 and (entry_idx + 3 < len(history_closes)):
                             c3 = history_closes[entry_idx + 3]
                             ret3 = ((c3 - buy_price) / buy_price) * 100
-                            cells_to_update.append(Cell(row=idx, col=14, value=f"{ret3:+.2f}%"))
+                            cells_to_update.append(Cell(row=idx, col=14, value=format_return(ret3, 60.0)))
                             print(f"   - 3영업일 후 ({history_dates[entry_idx + 3]}): {c3:,.0f}원 ({ret3:+.2f}%)")
                             
                         # 5일후 수익률 (i + 5)
                         if not r5 and (entry_idx + 5 < len(history_closes)):
                             c5 = history_closes[entry_idx + 5]
                             ret5 = ((c5 - buy_price) / buy_price) * 100
-                            cells_to_update.append(Cell(row=idx, col=15, value=f"{ret5:+.2f}%"))
+                            cells_to_update.append(Cell(row=idx, col=15, value=format_return(ret5, 80.0)))
                             print(f"   - 5영업일 후 ({history_dates[entry_idx + 5]}): {c5:,.0f}원 ({ret5:+.2f}%)")
             except Exception as yf_err:
                 print(f"   Warning: Failed to fetch yfinance data for {ticker}: {yf_err}")

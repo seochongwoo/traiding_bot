@@ -1,0 +1,28 @@
+name: Keepalive Workflow
+
+on:
+  schedule:
+    # 2주마다 (매월 1일, 15일 00:00 UTC) 실행하여 GitHub 60일 비활성화 방지
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Update Heartbeat File
+        run: |
+          mkdir -p .github
+          echo "Heartbeat at $(date -u +"%Y-%m-%d %H:%M:%SZ") to prevent GitHub Actions 60-day inactivity deactivation." > .github/heartbeat.txt
+
+      - name: Commit and Push Changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Keepalive"
+          git add .github/heartbeat.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: GitHub Actions keepalive heartbeat" && git push)

@@ -8,6 +8,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
 }
 
+def clean_title(title: str) -> str:
+    """네이버 링크 접근성 문구('새 창 열림') 등 HTML 아티팩트를 제거합니다."""
+    if not title:
+        return ""
+    title = title.replace("새 창 열림", "")
+    return " ".join(title.split()).strip()
+
 def parse_news_div(div) -> dict:
     """
     네이버 뉴스 검색 결과의 단일 div 노드에서 제목, 원본 링크, 네이버 뉴스 링크, 스니펫을 구조적으로 추출합니다.
@@ -67,7 +74,7 @@ def parse_news_div(div) -> dict:
             break
             
     return {
-        "title": title,
+        "title": clean_title(title),
         "original_link": article_href,
         "naver_news_link": naver_news_link,
         "snippet": snippet
@@ -120,7 +127,7 @@ def fetch_news_list(keyword: str, limit: int = 5) -> list:
                 if not tit_element:
                     continue
                     
-                title = tit_element.get_text().strip()
+                title = clean_title(tit_element.get_text())
                 original_link = tit_element.get("href", "")
                 
                 naver_news_link = ""
