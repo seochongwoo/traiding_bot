@@ -22,26 +22,36 @@ def get_stock_indicators(keyword: str):
             print(f"Warning: Not enough data points fetched for {ticker} (Length: {len(df) if df is not None else 0}).")
             return None
 
-        # 1. 실시간 현재가 획득 (fast_info 및 intraday 1m 우선 사용으로 과거 일봉 지연 왜곡 방지)
+        # 1. 실시간 현재가 및 당일 시가(open_price) 획득
         t_obj = yf.Ticker(ticker)
         current_price = None
+        open_price = None
         try:
             fast_price = t_obj.fast_info.last_price
             if fast_price is not None and fast_price > 0:
                 current_price = float(fast_price)
+            fast_open = getattr(t_obj.fast_info, "open", None)
+            if fast_open is not None and fast_open > 0:
+                open_price = float(fast_open)
         except Exception as e:
             print(f"Warning: fast_info fetch failed for {ticker}: {e}")
 
-        if current_price is None or current_price <= 0:
+        if current_price is None or current_price <= 0 or open_price is None or open_price <= 0:
             try:
                 df_1m = t_obj.history(period="1d", interval="1m")
                 if not df_1m.empty:
-                    current_price = float(df_1m['Close'].iloc[-1])
+                    if current_price is None or current_price <= 0:
+                        current_price = float(df_1m['Close'].iloc[-1])
+                    if open_price is None or open_price <= 0:
+                        open_price = float(df_1m['Open'].iloc[0])
             except Exception as e:
                 print(f"Warning: 1m intraday fetch failed for {ticker}: {e}")
 
         if current_price is None or current_price <= 0:
             current_price = float(df['Close'].iloc[-1])
+        if open_price is None or open_price <= 0:
+            open_price = float(df['Open'].iloc[-1])
+        prev_close = float(df['Close'].iloc[-2]) if len(df) >= 2 else open_price
 
         # 2. RSI (14일 기준, 와일더 지수이동평균 방식)
         delta = df['Close'].diff()
@@ -81,6 +91,8 @@ def get_stock_indicators(keyword: str):
 
         indicators = {
             "current_price": current_price,
+            "open_price": open_price,
+            "prev_close": prev_close,
             "rsi": rsi,
             "atr": atr,
             "disparity": disparity,

@@ -18,7 +18,8 @@ if "--dry-run" in sys.argv:
 
 from config import (
     TARGET_KEYWORDS, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS, TICKER_MAP, 
-    DRY_RUN, DEDUP_WINDOW_HOURS, DEDUP_JACCARD
+    DRY_RUN, DEDUP_WINDOW_HOURS, DEDUP_JACCARD, PENDING_MAX_AGE_HOURS,
+    MIN_GAP_PCT, MAX_GAP_UP_PCT
 )
 from crawler import fetch_news_list, get_news_content
 from db import (
@@ -30,7 +31,7 @@ from analyzer import analyze_news_sentiment
 from notifier import send_discord_signal, send_discord_sell_alert
 from chart import get_stock_indicators, check_market_trend, get_intraday_bars, get_today_open
 from strategy import (
-    now_kst, is_session_time, evaluate_entry, compute_tp_sl,
+    now_kst, is_session_time, is_pending_fill_window, evaluate_entry, compute_tp_sl,
     gap_check, resolve_exit, in_cooldown, KST
 )
 from dedup import find_duplicate
@@ -39,6 +40,7 @@ from dedup import find_duplicate
 def run_trading_bot():
     current_kst = now_kst()
     is_session = is_session_time(current_kst)
+    in_fill_window = is_pending_fill_window(current_kst)
     current_kst_str = current_kst.strftime("%Y-%m-%d %H:%M:%S")
 
     print("==================================================")
@@ -50,6 +52,10 @@ def run_trading_bot():
 
     pos_sheet = open_worksheet("Active_Positions") if not DRY_RUN else None
     all_positions = fetch_all_positions(pos_sheet) if pos_sheet else []
+
+    # 중요: Phase 0에서 방금 체결된 주문이 같은 턴의 Phase 1에서 '체결 이전 아침 봉'으로 자폭 손절되는 버그를 막기 위해
+    # 기존 보유중이던 포지션만 Phase 1 감시 대상으로 먼저 분리합니다.
+    active_positions = [p for p in all_positions if p["status"] == "보유중"]
 
     # --------------------------------------------------
     # ⏳ Phase 0: 장외 진입대기 주문 체결 판단 (Pending Orders)
@@ -67,16 +73,31 @@ def run_trading_bot():
             sig_price = p["signal_price"] or p["buy_price"]
             print(f"\nEvaluating pending order: {name} (Signal: {sig_price:,.0f}원)")
 
-            # 생성 시각 기준 48시간 이상 경과 시 취소 처리
+            # 1. 생성 시각 기준 최대 보관 시간(96h, 주말 포함) 경과 시 만료
             try:
                 created_dt = datetime.strptime(p["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
-                if current_kst - created_dt > timedelta(hours=48):
-                    print(f"   -> Expired (> 48h). Cancelling pending order.")
-                    batch_update_position(pos_sheet, row_num, {7: "진입취소", 17: "시간초과 만료"})
+                if current_kst - created_dt > timedelta(hours=PENDING_MAX_AGE_HOURS):
+                    print(f"   -> Expired (> {PENDING_MAX_AGE_HOURS}h). Cancelling pending order.")
+                    batch_update_position(pos_sheet, row_num, {
+                        7: "진입취소",
+                        16: current_kst_str,
+                        17: "시간초과 만료"
+                    })
                     p["status"] = "진입취소"
                     continue
             except Exception:
                 pass
+
+            # 2. 오전장 초반(09:00 ~ 10:00 KST)이 지났다면 오후 뒤늦은 고점 추격 체결을 막기 위해 취소 처리
+            if not in_fill_window:
+                print("   -> Past morning fill window (09:00~10:00 KST). Cancelling stale pending order.")
+                batch_update_position(pos_sheet, row_num, {
+                    7: "진입취소",
+                    16: current_kst_str,
+                    17: "오전장 체결 시간(10:00) 경과 취소"
+                })
+                p["status"] = "진입취소"
+                continue
 
             today_open = get_today_open(name)
             chart_data = get_stock_indicators(name)
@@ -84,13 +105,22 @@ def run_trading_bot():
                 print(f"   -> Failed to fetch opening/current price for {name}. Keeping pending.")
                 continue
 
-            gap_pct, can_enter = gap_check(sig_price, today_open)
-            print(f"   -> Today Open: {today_open:,.0f}원 | Gap: {gap_pct:+.2f}% | Can Enter: {can_enter}")
+            current_price = chart_data["current_price"]
+            fill_price = max(today_open, current_price)
+            gap_pct, can_enter = gap_check(sig_price, today_open, fill_price=fill_price)
+            fill_gap_pct = (fill_price / sig_price - 1) * 100
+
+            # 트랙 B 대기주문인 경우 시초가 대비 음봉 하락 중이면 체결 거부
+            track_b_bearish = (p.get("track") == "B" and current_price < today_open)
+            if track_b_bearish:
+                can_enter = False
+
+            print(
+                f"   -> Today Open: {today_open:,.0f}원 ({gap_pct:+.2f}%) | "
+                f"Fill Price: {fill_price:,.0f}원 ({fill_gap_pct:+.2f}%) | Can Enter: {can_enter}"
+            )
 
             if can_enter:
-                # 갭상승이 +3% 이내: 당일 시초가와 현재가 중 높은 가격으로 안전 체결
-                current_price = chart_data["current_price"]
-                fill_price = max(today_open, current_price)
                 new_target, new_stop = compute_tp_sl(fill_price, chart_data["atr"])
                 note_str = f"체결 (시초가 갭 {gap_pct:+.2f}%)"
 
@@ -105,6 +135,8 @@ def run_trading_bot():
                     16: current_kst_str,
                     17: note_str
                 })
+                p["date"] = current_kst_str
+                p["last_checked"] = current_kst_str
                 p["status"] = "보유중"
                 p["buy_price"] = fill_price
                 p["target_price"] = new_target
@@ -117,7 +149,11 @@ def run_trading_bot():
                     title=f"[대기주문 정규장 체결] {name}",
                     url="https://finance.naver.com",
                     score=7,
-                    summary=f"- 전일 장외 발생 주문이 오늘 시초가({today_open:,.0f}원) 확인 후 정상 체결됨\n- 시초가 갭: {gap_pct:+.2f}%\n- 체결가: {fill_price:,.0f}원",
+                    summary=(
+                        f"- 전일 장외 발생 주문이 오전 정규장 시초가({today_open:,.0f}원) 검증 후 체결됨\n"
+                        f"- 시초가 갭: {gap_pct:+.2f}% (허용범위 {MIN_GAP_PCT:+.1f}%~{MAX_GAP_UP_PCT:+.1f}%)\n"
+                        f"- 체결가: {fill_price:,.0f}원"
+                    ),
                     keywords=[name, "대기체결", p["track"]],
                     buy_price=fill_price,
                     target_price=new_target,
@@ -127,13 +163,18 @@ def run_trading_bot():
                     track=p["track"]
                 )
             else:
-                # 갭상승 +3% 초과: 추격매수 금지 원칙에 따라 주문 취소
-                cancel_reason = f"진입취소 (갭 {gap_pct:+.2f}%)"
-                print(f"   🚫 [체결 취소] Gap +{gap_pct:.2f}% exceeds limit (+3.0%).")
+                if track_b_bearish:
+                    reason_detail = f"트랙B 시초가 대비 음봉 하락 ({current_price:,.0f}원 < 시초가 {today_open:,.0f}원)"
+                elif gap_pct < MIN_GAP_PCT:
+                    reason_detail = f"시초가 갭하락 이탈 ({gap_pct:+.2f}% < {MIN_GAP_PCT:+.1f}%)"
+                else:
+                    reason_detail = f"시초가/체결가 과대 갭상승 (시초 {gap_pct:+.2f}%, 체결 {fill_gap_pct:+.2f}%)"
+
+                print(f"   🚫 [체결 취소] {reason_detail}")
                 batch_update_position(pos_sheet, row_num, {
                     7: "진입취소",
                     16: current_kst_str,
-                    17: f"시초가 과대 갭상승 ({today_open:,.0f}원 / 시그널 {sig_price:,.0f}원)"
+                    17: reason_detail
                 })
                 p["status"] = "진입취소"
 
@@ -143,9 +184,7 @@ def run_trading_bot():
     print("\n==================================================")
     print("🔄 Phase 1: Monitoring & Liquidating Active Positions")
     print("==================================================")
-    
-    active_positions = [p for p in all_positions if p["status"] == "보유중"]
-    print(f"Found {len(active_positions)} active positions to monitor.")
+    print(f"Found {len(active_positions)} pre-existing active positions to monitor.")
 
     for pos in active_positions:
         keyword = pos["name"]
@@ -158,16 +197,23 @@ def run_trading_bot():
         
         print(f"\nChecking position: {keyword} ({symbol}) | Entry: {buy_price:,.0f} | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
 
-        # 마지막 점검 시각 파싱
+        # 마지막 점검 시각(또는 진입 시각) 파싱 — 반드시 진입 시각 이후의 봉만 조회하도록 보장
         last_dt = None
-        last_str = pos.get("last_checked") or pos.get("date")
-        if last_str:
+        entry_dt = None
+        if pos.get("date"):
             try:
-                last_dt = datetime.strptime(last_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+                entry_dt = datetime.strptime(pos["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
             except Exception:
                 pass
+        if pos.get("last_checked"):
+            try:
+                last_dt = datetime.strptime(pos["last_checked"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+            except Exception:
+                pass
+        if entry_dt and (not last_dt or last_dt < entry_dt):
+            last_dt = entry_dt
 
-        # 장중 5분봉 조회 (점검 주기 사이의 High/Low 터치 감지)
+        # 장중 5분봉 조회 (진입/점검 시각 이후의 High/Low 터치만 감지)
         bars = get_intraday_bars(keyword, since_dt=last_dt)
         chart_data = get_stock_indicators(keyword)
         if not bars and chart_data:
@@ -247,7 +293,7 @@ def run_trading_bot():
     market_ok = bool(kospi_ok and nasdaq_ok)
     if not market_ok:
         print(f"⚠️ [대세 하락장 상태 감지] KOSPI: {kospi_ok} | NASDAQ: {nasdaq_ok}")
-        print("Market is in a downtrend. Track A momentum is blocked, but Track B contrarian remains active.")
+        print("Market is in a downtrend. Track A momentum is blocked; Track B requires Score>=6 + RSI<=35 + bullish rebound.")
     else:
         print("✅ [시장 상승세 판정] KOSPI와 NASDAQ이 모두 20일선 위에 있습니다.")
 
@@ -316,9 +362,13 @@ def run_trading_bot():
             disparity = chart_data["disparity"] if chart_data else None
             macd_dead_cross = chart_data["macd_dead_cross"] if chart_data else None
             current_price = chart_data["current_price"] if chart_data else 0.0
+            open_price = chart_data.get("open_price") if chart_data else None
 
-            # 2개 트랙(A: 모멘텀, B: 역발상) 판정
-            track, reasons = evaluate_entry(score, article_type, rsi, disparity, macd_dead_cross, market_ok)
+            # 2개 트랙(A: 모멘텀, B: 역발상+양봉확인) 판정
+            track, reasons = evaluate_entry(
+                score, article_type, rsi, disparity, macd_dead_cross, market_ok,
+                current_price=current_price, open_price=open_price
+            )
 
             # 중복 보유 및 쿨다운 검증
             if in_cooldown(all_positions, symbol, current_kst):

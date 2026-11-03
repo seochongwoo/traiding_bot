@@ -58,26 +58,27 @@ DRY_RUN = os.getenv("DRY_RUN") == "1"
 # 정규장 시간 (KST) - 이 시간 밖의 시그널은 '진입대기'로 기록 후 다음 정규장에서 체결 판단
 MARKET_OPEN_HHMM = (9, 0)
 MARKET_ENTRY_CUTOFF_HHMM = (15, 20)
-MAX_GAP_UP_PCT = 3.0          # 시그널가 대비 시초가 갭상승이 이 값 초과면 진입취소
+PENDING_FILL_DEADLINE_HHMM = (10, 0)  # 대기주문은 오전장 초반(09:00~10:00)에만 체결 허용
+PENDING_MAX_AGE_HOURS = 96            # 주말 포함 대기주문 최대 보관 시간 (첫 정규장 10시 경과 시 만료)
+MIN_GAP_PCT = -1.0                    # 시그널가 대비 시초가 갭하락이 이 값 미만이면 진입취소 (칼날 잡기 방지)
+MAX_GAP_UP_PCT = 3.0                  # 시그널가 대비 시초가/체결가 갭상승이 이 값 초과면 진입취소
 
 # 트랙 A: 호재 모멘텀 돌파
 MOMENTUM_SCORE_MIN = 7
 MOMENTUM_RSI_MAX = 65
 MOMENTUM_DISPARITY_MAX = 115
 
-# 트랙 B: 과매도 눌림목 역발상 (거시 지수 필터 미적용)
+# 트랙 B: 과매도 눌림목 역발상 (강한 호재 + 당일 양봉 반등 확인 필수)
 CONTRARIAN_RSI_MAX = 35
-CONTRARIAN_SCORE_MIN = 3
+CONTRARIAN_SCORE_MIN = 6
 
-# 리스크 관리
-TARGET_PCT_MIN, TARGET_PCT_MAX = 2.5, 5.0
-STOP_PCT_MIN, STOP_PCT_MAX = 1.5, 3.0
-BREAKEVEN_TRIGGER_PCT = 2.5   # 최고 수익률이 이 값 이상이면 손절가를 본절로 상향
+# 리스크 관리 (목표가 +3.0~4.0% 현실화, +2.0% 도달 시 본절 스탑 가동)
+TARGET_PCT_MIN, TARGET_PCT_MAX = 3.0, 4.0
+STOP_PCT_MIN, STOP_PCT_MAX = 1.8, 2.5
+BREAKEVEN_TRIGGER_PCT = 2.0   # 최고 수익률이 이 값 이상이면 손절가를 본절로 상향
 BREAKEVEN_STOP_MULT = 1.003   # 본절 + 수수료
 REENTRY_COOLDOWN_HOURS = 24
 
 # 중복 기사 제거
 DEDUP_JACCARD = 0.4
 DEDUP_WINDOW_HOURS = 12
-
-
