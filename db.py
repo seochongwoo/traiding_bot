@@ -37,7 +37,7 @@ def open_worksheet(tab_name: str):
             sheet = sh.worksheet(tab_name)
         except gspread.exceptions.WorksheetNotFound:
             print(f"Worksheet '{tab_name}' not found. Creating a new one...")
-            sheet = sh.add_worksheet(title=tab_name, rows="1000", cols="20")
+            sheet = sh.add_worksheet(title=tab_name, rows="1000", cols="25")
         
         # 비어있으면 헤더 작성
         row1 = sheet.row_values(1)
@@ -53,7 +53,8 @@ def open_worksheet(tab_name: str):
                     "진입일자", "종목코드", "종목명", "매수가", "목표가", 
                     "손절가", "상태", "청산일자", "청산가", "청산사유", 
                     "수익률(%)", "최고가도달", "최고가도달률(%)",
-                    "시그널가", "진입트랙", "최종점검시각", "비고"
+                    "시그널가", "진입트랙", "최종점검시각", "비고",
+                    "매수수량", "매수금액", "실현손익(원)", "계좌잔고(원)"
                 ]
             else:
                 headers = []
@@ -187,10 +188,28 @@ def fetch_recent_titles(sheet, keyword: str, hours: int = 12) -> list:
         print(f"Warning: Failed to fetch recent titles: {e}")
         return []
 
+def _safe_float(val: str, default=0.0):
+    val_s = val.strip().replace(",", "") if val else ""
+    if not val_s:
+        return default
+    try:
+        return float(val_s)
+    except ValueError:
+        return default
+
+def _safe_int(val: str, default=0):
+    val_s = val.strip().replace(",", "") if val else ""
+    if not val_s:
+        return default
+    try:
+        return int(float(val_s))
+    except ValueError:
+        return default
+
 def fetch_all_positions(sheet) -> list:
     """
     Active_Positions 탭에서 모든 행(상태 무관)을 가져옵니다.
-    진입대기, 보유중, 청산완료를 모두 포함하여 쿨다운 및 대기 주문 체결에 활용합니다.
+    진입대기, 보유중, 청산완료를 모두 포함하여 쿨다운, 대기 주문 체결, 가상 계좌 계산에 활용합니다.
     """
     positions = []
     if not sheet:
@@ -199,29 +218,32 @@ def fetch_all_positions(sheet) -> list:
         all_rows = sheet.get_all_values()
         if len(all_rows) <= 1:
             return positions
-        headers = all_rows[0]
         for idx, row in enumerate(all_rows[1:], start=2):
-            while len(row) < 17:
+            while len(row) < 21:
                 row.append("")
             positions.append({
                 "row_num": idx,
                 "date": row[0].strip(),
                 "symbol": row[1].strip(),
                 "name": row[2].strip(),
-                "buy_price": float(row[3]) if row[3] else 0.0,
-                "target_price": float(row[4]) if row[4] else 0.0,
-                "stop_loss": float(row[5]) if row[5] else 0.0,
+                "buy_price": _safe_float(row[3], 0.0),
+                "target_price": _safe_float(row[4], 0.0),
+                "stop_loss": _safe_float(row[5], 0.0),
                 "status": row[6].strip(),
                 "close_date": row[7].strip(),
-                "close_price": float(row[8]) if row[8] else 0.0,
+                "close_price": _safe_float(row[8], 0.0),
                 "reason": row[9].strip(),
-                "return_rate": float(row[10]) if row[10] else 0.0,
-                "highest_price": float(row[11]) if row[11] else 0.0,
-                "highest_rate": float(row[12]) if row[12] else 0.0,
-                "signal_price": float(row[13]) if row[13] else 0.0,
+                "return_rate": _safe_float(row[10], 0.0),
+                "highest_price": _safe_float(row[11], 0.0),
+                "highest_rate": _safe_float(row[12], 0.0),
+                "signal_price": _safe_float(row[13], 0.0),
                 "track": row[14].strip(),
                 "last_checked": row[15].strip(),
-                "note": row[16].strip()
+                "note": row[16].strip(),
+                "qty": _safe_int(row[17], 0),
+                "invest_amount": _safe_float(row[18], 0.0),
+                "pnl_krw": _safe_float(row[19], None),
+                "account_balance": _safe_float(row[20], None),
             })
         return positions
     except Exception as e:
@@ -235,18 +257,32 @@ def fetch_active_positions(sheet) -> list:
     all_pos = fetch_all_positions(sheet)
     return [p for p in all_pos if p["status"] == "보유중"]
 
-def liquidate_position(sheet, row_num: int, close_date: str, close_price: float, reason: str, return_rate: float) -> bool:
+def liquidate_position(
+    sheet,
+    row_num: int,
+    close_date: str,
+    close_price: float,
+    reason: str,
+    return_rate: float,
+    pnl_krw: float = None,
+    account_balance: float = None,
+) -> bool:
     """
-    포지션 청산 시 관련 정보를 단 1회의 batch_update로 입력하고 상태를 '청산완료'로 변경합니다.
+    포지션 청산 시 관련 정보(실현손익, 계좌잔고 포함)를 단 1회의 batch_update로 입력하고 상태를 '청산완료'로 변경합니다.
     """
-    return batch_update_position(sheet, row_num, {
+    update_dict = {
         7: "청산완료",
         8: close_date,
         9: round(close_price),
         10: reason,
         11: round(return_rate, 2),
-        16: close_date
-    })
+        16: close_date,
+    }
+    if pnl_krw is not None:
+        update_dict[20] = round(pnl_krw)
+    if account_balance is not None:
+        update_dict[21] = round(account_balance)
+    return batch_update_position(sheet, row_num, update_dict)
 
 def update_position_highest(sheet, row_num: int, highest_price: float, highest_rate: float, last_checked: str = "") -> bool:
     """
@@ -260,25 +296,55 @@ def update_position_highest(sheet, row_num: int, highest_price: float, highest_r
         update_data[16] = last_checked
     return batch_update_position(sheet, row_num, update_data)
 
-def add_active_position(sheet, date_str: str, symbol: str, name: str, buy_price: float, 
-                        target_price: float, stop_loss: float, status: str = "보유중",
-                        signal_price: float = 0.0, track: str = "A", note: str = "") -> bool:
+def add_active_position(
+    sheet,
+    date_str: str,
+    symbol: str,
+    name: str,
+    buy_price: float,
+    target_price: float,
+    stop_loss: float,
+    status: str = "보유중",
+    signal_price: float = 0.0,
+    track: str = "A",
+    note: str = "",
+    qty: int = 0,
+    invest_amount: float = 0.0,
+    account_balance: float = None,
+) -> bool:
     """
-    새로 진입/대기하는 종목 정보를 Active_Positions 탭에 행으로 추가합니다.
+    새로 진입/대기하는 종목 정보를 Active_Positions 탭에 행으로 추가합니다 (21개 컬럼).
     """
     if not sheet:
         return False
     try:
-        # 17개 컬럼 매핑:
-        # 진입일자 | 종목코드 | 종목명 | 매수가 | 목표가 | 손절가 | 상태 | 청산일자 | 청산가 | 청산사유 | 수익률(%) | 최고가도달 | 최고가도달률(%) | 시그널가 | 진입트랙 | 최종점검시각 | 비고
+        # 21개 컬럼 매핑:
+        # 1:진입일자 | 2:종목코드 | 3:종목명 | 4:매수가 | 5:목표가 | 6:손절가 | 7:상태 | 8:청산일자 | 9:청산가 | 10:청산사유
+        # 11:수익률(%) | 12:최고가도달 | 13:최고가도달률(%) | 14:시그널가 | 15:진입트랙 | 16:최종점검시각 | 17:비고
+        # 18:매수수량 | 19:매수금액 | 20:실현손익(원) | 21:계좌잔고(원)
         hp = buy_price if status == "보유중" else 0.0
         row = [
-            date_str, symbol, name, round(buy_price) if buy_price else "",
-            round(target_price) if target_price else "", round(stop_loss) if stop_loss else "",
-            status, "", "", "", "",
-            round(hp) if hp else "", 0.0 if status == "보유중" else "",
+            date_str,
+            symbol,
+            name,
+            round(buy_price) if buy_price else "",
+            round(target_price) if target_price else "",
+            round(stop_loss) if stop_loss else "",
+            status,
+            "",
+            "",
+            "",
+            "",
+            round(hp) if hp else "",
+            0.0 if status == "보유중" else "",
             round(signal_price) if signal_price else round(buy_price),
-            track, date_str, note
+            track,
+            date_str,
+            note,
+            qty if qty > 0 else "",
+            round(invest_amount) if invest_amount > 0 else "",
+            "",
+            round(account_balance) if account_balance is not None else "",
         ]
         sheet.append_row(row)
         return True

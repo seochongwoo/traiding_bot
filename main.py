@@ -19,7 +19,7 @@ if "--dry-run" in sys.argv:
 from config import (
     TARGET_KEYWORDS, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS, TICKER_MAP, 
     DRY_RUN, DEDUP_WINDOW_HOURS, DEDUP_JACCARD, PENDING_MAX_AGE_HOURS,
-    MIN_GAP_PCT, MAX_GAP_UP_PCT
+    MIN_GAP_PCT, MAX_GAP_UP_PCT, INITIAL_CAPITAL, MAX_POSITION_SLOTS, SLOT_BUDGET
 )
 from crawler import fetch_news_list, get_news_content
 from db import (
@@ -32,9 +32,23 @@ from notifier import send_discord_signal, send_discord_sell_alert
 from chart import get_stock_indicators, check_market_trend, get_intraday_bars, get_today_open
 from strategy import (
     now_kst, is_session_time, is_pending_fill_window, evaluate_entry, compute_tp_sl,
-    gap_check, resolve_exit, in_cooldown, KST
+    gap_check, resolve_exit, in_cooldown, compute_portfolio_state, compute_order_qty,
+    compute_realized_pnl, KST
 )
 from dedup import find_duplicate
+
+
+def print_portfolio_banner(portfolio: dict, label: str = "가상 계좌 현황"):
+    print(f"\n💼 [{label}] (원금 {portfolio['initial_capital']:,.0f}원 | 종목당 한도 {SLOT_BUDGET:,.0f}원)")
+    print(
+        f"   - 총자산(확정기준): {portfolio['total_equity']:,.0f}원 "
+        f"(누적 실현손익: {portfolio['realized_pnl']:+,.0f}원 / {portfolio['total_return_pct']:+.2f}%)"
+    )
+    print(
+        f"   - 가용 예수금: {portfolio['available_cash']:,.0f}원 | "
+        f"보유 매수원금: {portfolio['invested_amount']:,.0f}원 "
+        f"(슬롯: {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
+    )
 
 
 def run_trading_bot():
@@ -52,6 +66,9 @@ def run_trading_bot():
 
     pos_sheet = open_worksheet("Active_Positions") if not DRY_RUN else None
     all_positions = fetch_all_positions(pos_sheet) if pos_sheet else []
+
+    portfolio = compute_portfolio_state(all_positions)
+    print_portfolio_banner(portfolio, label="시작 시점 가상 계좌 현황")
 
     # 중요: Phase 0에서 방금 체결된 주문이 같은 턴의 Phase 1에서 '체결 이전 아침 봉'으로 자폭 손절되는 버그를 막기 위해
     # 기존 보유중이던 포지션만 Phase 1 감시 대상으로 먼저 분리합니다.
@@ -115,14 +132,35 @@ def run_trading_bot():
             if track_b_bearish:
                 can_enter = False
 
+            portfolio = compute_portfolio_state(all_positions)
+            qty, invest_amount = compute_order_qty(
+                fill_price, portfolio["available_cash"], portfolio["active_slots"]
+            )
+            insufficient_budget = (can_enter and qty <= 0)
+            if insufficient_budget:
+                can_enter = False
+
             print(
                 f"   -> Today Open: {today_open:,.0f}원 ({gap_pct:+.2f}%) | "
-                f"Fill Price: {fill_price:,.0f}원 ({fill_gap_pct:+.2f}%) | Can Enter: {can_enter}"
+                f"Fill Price: {fill_price:,.0f}원 ({fill_gap_pct:+.2f}%) | "
+                f"Order Qty: {qty}주 ({invest_amount:,.0f}원) | Can Enter: {can_enter}"
             )
 
             if can_enter:
                 new_target, new_stop = compute_tp_sl(fill_price, chart_data["atr"])
                 note_str = f"체결 (시초가 갭 {gap_pct:+.2f}%)"
+
+                p["date"] = current_kst_str
+                p["last_checked"] = current_kst_str
+                p["status"] = "보유중"
+                p["buy_price"] = fill_price
+                p["target_price"] = new_target
+                p["stop_loss"] = new_stop
+                p["highest_price"] = fill_price
+                p["qty"] = qty
+                p["invest_amount"] = invest_amount
+
+                portfolio = compute_portfolio_state(all_positions)
 
                 batch_update_position(pos_sheet, row_num, {
                     1: current_kst_str,
@@ -133,17 +171,16 @@ def run_trading_bot():
                     12: round(fill_price),
                     13: 0.0,
                     16: current_kst_str,
-                    17: note_str
+                    17: note_str,
+                    18: qty,
+                    19: round(invest_amount),
+                    21: portfolio["total_equity"],
                 })
-                p["date"] = current_kst_str
-                p["last_checked"] = current_kst_str
-                p["status"] = "보유중"
-                p["buy_price"] = fill_price
-                p["target_price"] = new_target
-                p["stop_loss"] = new_stop
-                p["highest_price"] = fill_price
 
-                print(f"   ✅ [체결 완료] {name} at {fill_price:,.0f}원 | Target: {new_target:,.0f} | Stop: {new_stop:,.0f}")
+                print(
+                    f"   ✅ [체결 완료] {name} at {fill_price:,.0f}원 x {qty}주 ({invest_amount:,.0f}원) | "
+                    f"Target: {new_target:,.0f} | Stop: {new_stop:,.0f} | 잔여예수금: {portfolio['available_cash']:,.0f}원"
+                )
                 send_discord_signal(
                     keyword=name,
                     title=f"[대기주문 정규장 체결] {name}",
@@ -152,7 +189,7 @@ def run_trading_bot():
                     summary=(
                         f"- 전일 장외 발생 주문이 오전 정규장 시초가({today_open:,.0f}원) 검증 후 체결됨\n"
                         f"- 시초가 갭: {gap_pct:+.2f}% (허용범위 {MIN_GAP_PCT:+.1f}%~{MAX_GAP_UP_PCT:+.1f}%)\n"
-                        f"- 체결가: {fill_price:,.0f}원"
+                        f"- 체결가: {fill_price:,.0f}원 ({qty}주 / 총 {invest_amount:,.0f}원)"
                     ),
                     keywords=[name, "대기체결", p["track"]],
                     buy_price=fill_price,
@@ -160,10 +197,19 @@ def run_trading_bot():
                     stop_loss=new_stop,
                     rsi=chart_data["rsi"],
                     atr=chart_data["atr"],
-                    track=p["track"]
+                    track=p["track"],
+                    qty=qty,
+                    invest_amount=invest_amount,
+                    available_cash=portfolio["available_cash"],
+                    total_equity=portfolio["total_equity"],
                 )
             else:
-                if track_b_bearish:
+                if insufficient_budget:
+                    reason_detail = (
+                        f"예수금/슬롯 부족 취소 (가용 {portfolio['available_cash']:,.0f}원, "
+                        f"슬롯 {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
+                    )
+                elif track_b_bearish:
                     reason_detail = f"트랙B 시초가 대비 음봉 하락 ({current_price:,.0f}원 < 시초가 {today_open:,.0f}원)"
                 elif gap_pct < MIN_GAP_PCT:
                     reason_detail = f"시초가 갭하락 이탈 ({gap_pct:+.2f}% < {MIN_GAP_PCT:+.1f}%)"
@@ -194,8 +240,10 @@ def run_trading_bot():
         target_price = pos["target_price"]
         stop_loss = pos["stop_loss"]
         highest_price = pos["highest_price"]
+        qty = int(pos.get("qty") or 0)
         
-        print(f"\nChecking position: {keyword} ({symbol}) | Entry: {buy_price:,.0f} | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
+        qty_label = f" | Qty: {qty}주" if qty > 0 else " | (구버전 수량미지정)"
+        print(f"\nChecking position: {keyword} ({symbol}) | Entry: {buy_price:,.0f}{qty_label} | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
 
         # 마지막 점검 시각(또는 진입 시각) 파싱 — 반드시 진입 시각 이후의 봉만 조회하도록 보장
         last_dt = None
@@ -250,7 +298,20 @@ def run_trading_bot():
         if exit_price is not None:
             is_profit = (reason == "익절")
             return_rate = ((exit_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
-            print(f"   🔔 [청산 발동] {keyword} | Reason: {reason} | Price: {exit_price:,.0f}원 ({return_rate:+.2f}%)")
+            pnl_krw = compute_realized_pnl(buy_price, exit_price, qty) if qty > 0 else None
+
+            pos["status"] = "청산완료"
+            pos["close_date"] = current_kst_str
+            pos["close_price"] = exit_price
+            pos["pnl_krw"] = pnl_krw
+
+            portfolio = compute_portfolio_state(all_positions)
+            pnl_str = f" | 실현손익: {pnl_krw:+,.0f}원" if pnl_krw is not None else ""
+            print(
+                f"   🔔 [청산 발동] {keyword} | Reason: {reason} | "
+                f"Price: {exit_price:,.0f}원 ({return_rate:+.2f}%){pnl_str} | "
+                f"총자산: {portfolio['total_equity']:,.0f}원"
+            )
 
             if not DRY_RUN:
                 send_discord_sell_alert(
@@ -261,7 +322,11 @@ def run_trading_bot():
                     target_price=target_price,
                     stop_loss=new_stop,
                     is_profit=is_profit,
-                    reason_str=reason
+                    reason_str=reason,
+                    qty=qty,
+                    pnl_krw=pnl_krw,
+                    available_cash=portfolio["available_cash"],
+                    total_equity=portfolio["total_equity"],
                 )
                 if pos_sheet:
                     liquidate_position(
@@ -270,10 +335,10 @@ def run_trading_bot():
                         close_date=current_kst_str,
                         close_price=exit_price,
                         reason=reason,
-                        return_rate=return_rate
+                        return_rate=return_rate,
+                        pnl_krw=pnl_krw,
+                        account_balance=portfolio["total_equity"] if qty > 0 else None,
                     )
-            pos["status"] = "청산완료"
-            pos["close_date"] = current_kst_str
         else:
             print(f"   Holding position: Exit conditions not met. Current stop: {new_stop:,.0f}원")
             if pos_sheet and not DRY_RUN:
@@ -375,6 +440,19 @@ def run_trading_bot():
                 reasons.append("이미 보유/대기/쿨다운")
                 track = None
 
+            # 정규장 진입 시 가상 계좌 가용 예수금 및 슬롯 한도 검증
+            portfolio = compute_portfolio_state(all_positions)
+            order_qty, invest_amount = 0, 0
+            if track and is_session:
+                order_qty, invest_amount = compute_order_qty(
+                    current_price, portfolio["available_cash"], portfolio["active_slots"]
+                )
+                if order_qty <= 0:
+                    reasons.append(
+                        f"예수금/슬롯 부족(가용 {portfolio['available_cash']:,.0f}원, 슬롯 {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
+                    )
+                    track = None
+
             entry_yn = "N"
             if track:
                 target_price, stop_loss = compute_tp_sl(current_price, atr)
@@ -382,7 +460,22 @@ def run_trading_bot():
                 if is_session:
                     # 정규장: 즉시 체결 및 보유중 등록
                     entry_yn = f"Y-{track}"
-                    print(f"🚀 [BUY Entry Triggered - Track {track}] {keyword} at {current_price:,.0f}원 | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f}")
+                    all_positions.append({
+                        "symbol": symbol,
+                        "name": keyword,
+                        "status": "보유중",
+                        "date": current_kst_str,
+                        "buy_price": current_price,
+                        "qty": order_qty,
+                        "invest_amount": invest_amount,
+                    })
+                    portfolio = compute_portfolio_state(all_positions)
+
+                    print(
+                        f"🚀 [BUY Entry Triggered - Track {track}] {keyword} at {current_price:,.0f}원 x {order_qty}주 "
+                        f"({invest_amount:,.0f}원) | Target: {target_price:,.0f} | Stop: {stop_loss:,.0f} | "
+                        f"잔여예수금: {portfolio['available_cash']:,.0f}원"
+                    )
                     
                     if not DRY_RUN:
                         send_discord_signal(
@@ -397,7 +490,11 @@ def run_trading_bot():
                             stop_loss=stop_loss,
                             rsi=rsi,
                             atr=atr,
-                            track=track
+                            track=track,
+                            qty=order_qty,
+                            invest_amount=invest_amount,
+                            available_cash=portfolio["available_cash"],
+                            total_equity=portfolio["total_equity"],
                         )
                         if pos_sheet:
                             add_active_position(
@@ -411,12 +508,14 @@ def run_trading_bot():
                                 status="보유중",
                                 signal_price=current_price,
                                 track=track,
-                                note="정규장 진입"
+                                note="정규장 진입",
+                                qty=order_qty,
+                                invest_amount=invest_amount,
+                                account_balance=portfolio["total_equity"],
                             )
-                    all_positions.append({"symbol": symbol, "name": keyword, "status": "보유중", "date": current_kst_str})
                     new_entries_count += 1
                 else:
-                    # 장외 시간: 진입대기로 등록 (전일 종가 즉시 체결 방지)
+                    # 장외 시간: 진입대기로 등록 (전일 종가 즉시 체결 방지, 수량은 다음 정규장 시초가 체결 시 확정)
                     entry_yn = f"대기-{track}"
                     print(f"⏳ [Pending Order Created - Track {track}] {keyword} at Signal {current_price:,.0f}원 (장외 발생)")
                     
@@ -432,7 +531,7 @@ def run_trading_bot():
                             status="진입대기",
                             signal_price=current_price,
                             track=track,
-                            note="장외 발생"
+                            note="장외 발생",
                         )
                     all_positions.append({"symbol": symbol, "name": keyword, "status": "진입대기", "date": current_kst_str})
                     new_entries_count += 1
@@ -468,10 +567,12 @@ def run_trading_bot():
             append_news_records(news_sheet, rows_to_append)
             print(f"Recorded {len(rows_to_append)} news articles to '시트1' in one batch.")
 
+    final_portfolio = compute_portfolio_state(all_positions)
     print("\n==================================================")
     print("Execution Finished Summary:")
     print(f"- Total new articles analyzed: {new_articles_count}")
     print(f"- Total new positions/orders: {new_entries_count}")
+    print_portfolio_banner(final_portfolio, label="종료 시점 가상 계좌 요약")
     print("==================================================")
 
 

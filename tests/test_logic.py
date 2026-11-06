@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from strategy import (
     is_session_time, is_pending_fill_window, evaluate_entry, compute_tp_sl,
-    gap_check, resolve_exit, in_cooldown, KST
+    gap_check, resolve_exit, in_cooldown, compute_portfolio_state,
+    compute_order_qty, compute_realized_pnl, KST
 )
 from dedup import tokenize, jaccard, find_duplicate
 
@@ -163,6 +164,51 @@ class TestStrategyLogic(unittest.TestCase):
         ]
         self.assertTrue(in_cooldown(positions, "005930.KS", now))
         self.assertFalse(in_cooldown(positions, "000660.KS", now))
+
+    def test_virtual_portfolio_sizing_and_balance(self):
+        # 1) 초기 상태 (구버전 qty=0 레거시 행은 잔고에 영향을 주지 않아야 함)
+        positions = [
+            {"symbol": "005930.KS", "status": "청산완료", "buy_price": 219750, "close_price": 213158, "qty": 0},
+        ]
+        pf = compute_portfolio_state(positions, initial_capital=20_000_000)
+        self.assertEqual(pf["available_cash"], 20_000_000)
+        self.assertEqual(pf["total_equity"], 20_000_000)
+        self.assertEqual(pf["active_slots"], 0)
+
+        # 2) 삼성전자(220,000원) 매수 수량 산출 -> 4,000,000 // 220,000 = 18주 (3,960,000원)
+        qty, inv = compute_order_qty(220_000, pf["available_cash"], pf["active_slots"])
+        self.assertEqual(qty, 18)
+        self.assertEqual(inv, 3_960_000)
+
+        # 3) 보유중 1건 + 청산완료 1건(+120,000원 수익) 반영 확인
+        positions.append({
+            "symbol": "005930.KS",
+            "status": "보유중",
+            "buy_price": 220_000,
+            "qty": 18,
+            "invest_amount": 3_960_000,
+        })
+        pnl = compute_realized_pnl(300_000, 310_000, 12)  # +120,000원
+        self.assertEqual(pnl, 120_000)
+        positions.append({
+            "symbol": "005380.KS",
+            "status": "청산완료",
+            "buy_price": 300_000,
+            "close_price": 310_000,
+            "qty": 12,
+            "pnl_krw": pnl,
+        })
+
+        pf2 = compute_portfolio_state(positions, initial_capital=20_000_000)
+        self.assertEqual(pf2["realized_pnl"], 120_000)
+        self.assertEqual(pf2["total_equity"], 20_120_000)
+        self.assertEqual(pf2["invested_amount"], 3_960_000)
+        self.assertEqual(pf2["available_cash"], 16_160_000)
+        self.assertEqual(pf2["active_slots"], 1)
+
+        # 4) 5슬롯 모두 찬 경우 추가 진입 불가 (qty=0)
+        qty_full, _ = compute_order_qty(200_000, 5_000_000, active_slots=5)
+        self.assertEqual(qty_full, 0)
 
 
 if __name__ == "__main__":

@@ -82,3 +82,9 @@ REENTRY_COOLDOWN_HOURS = 24
 # 중복 기사 제거
 DEDUP_JACCARD = 0.4
 DEDUP_WINDOW_HOURS = 12
+
+# 가상 계좌 (Paper Trading Portfolio) 설정 — 초기 원금 2,000만원 / 5슬롯 균등 배분
+INITIAL_CAPITAL = 20_000_000          # 초기 가상 원금 (2,000만원)
+MAX_POSITION_SLOTS = 5                # 최대 동시 보유 종목 수 (5종목)
+SLOT_BUDGET = INITIAL_CAPITAL // MAX_POSITION_SLOTS  # 종목당 1회 최대 매수 한도 (400만원)
+FEE_TAX_RATE = 0.002                  # 매도 시 수수료+제세금율 (약 0.20%)

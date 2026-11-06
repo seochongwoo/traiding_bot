@@ -148,3 +148,86 @@ def in_cooldown(positions, symbol, now: datetime) -> bool:
             if now - closed < timedelta(hours=C.REENTRY_COOLDOWN_HOURS):
                 return True
     return False
+
+
+def compute_realized_pnl(buy_price: float, sell_price: float, qty: int) -> int:
+    """매수가·청산가·수량 기준 실현 손익(원)을 계산합니다."""
+    if qty <= 0 or buy_price <= 0 or sell_price <= 0:
+        return 0
+    return round((sell_price - buy_price) * qty)
+
+
+def compute_portfolio_state(positions: list, initial_capital: int = None) -> dict:
+    """
+    Active_Positions 행 목록으로부터 가상 계좌(초기 원금 2,000만원) 상태를 계산합니다.
+    - 매수수량(qty > 0)이 기록된 가상계좌 거래만 합산하므로, 과거 수량 미기재(레거시) 행은 잔고에 영향을 주지 않습니다.
+    반환: dict(initial_capital, available_cash, invested_amount, realized_pnl, total_equity, total_return_pct, active_slots)
+    """
+    if initial_capital is None:
+        initial_capital = C.INITIAL_CAPITAL
+
+    realized_pnl = 0
+    invested_amount = 0
+    active_slots = 0
+
+    for p in positions:
+        qty = int(p.get("qty") or 0)
+        if qty <= 0:
+            continue
+
+        status = p.get("status", "")
+        buy_price = float(p.get("buy_price") or 0.0)
+        close_price = float(p.get("close_price") or 0.0)
+
+        if status == "청산완료":
+            pnl = p.get("pnl_krw")
+            if pnl is None or pnl == "":
+                pnl = compute_realized_pnl(buy_price, close_price, qty)
+            realized_pnl += round(float(pnl))
+        elif status == "보유중":
+            inv = p.get("invest_amount")
+            if not inv:
+                inv = round(buy_price * qty)
+            invested_amount += round(float(inv))
+            active_slots += 1
+
+    total_equity = initial_capital + realized_pnl
+    available_cash = max(0, total_equity - invested_amount)
+    total_return_pct = (realized_pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
+
+    return {
+        "initial_capital": round(initial_capital),
+        "available_cash": round(available_cash),
+        "invested_amount": round(invested_amount),
+        "realized_pnl": round(realized_pnl),
+        "total_equity": round(total_equity),
+        "total_return_pct": round(total_return_pct, 2),
+        "active_slots": active_slots,
+    }
+
+
+def compute_order_qty(
+    buy_price: float,
+    available_cash: float,
+    active_slots: int = 0,
+    slot_budget: float = None,
+    max_slots: int = None,
+):
+    """
+    5슬롯 균등 배분(종목당 최대 400만원) 및 가용 예수금 내에서 주문 가능 정수 주식 수(qty)와 매수금액을 반환합니다.
+    반환: (qty, invest_amount)
+    """
+    if slot_budget is None:
+        slot_budget = C.SLOT_BUDGET
+    if max_slots is None:
+        max_slots = C.MAX_POSITION_SLOTS
+
+    if buy_price <= 0 or available_cash <= 0 or active_slots >= max_slots:
+        return 0, 0
+
+    budget = min(slot_budget, available_cash)
+    qty = int(budget // buy_price)
+    if qty <= 0:
+        return 0, 0
+    invest_amount = round(buy_price * qty)
+    return qty, invest_amount

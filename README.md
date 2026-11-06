@@ -12,13 +12,16 @@
 ## 📌 주요 특징 (Key Features)
 
 - **100% 서버리스(Serverless) 아키텍처**: 별도 클라우드 서버(EC2 등) 없이 **GitHub Actions Cron**으로 매시 7분마다 완전 무료 자동 실행
-- **장외 체결 착시 방지 (Pending Order)**: 장외(15:20~09:00 KST)에 발생한 시그널은 `진입대기`로 보류 후, 익일 09:00 정규장 시초가 갭상승이 **+3.0% 이내**일 때만 실제 시세로 체결
+- **2,000만원 가상 계좌 (Paper Trading Portfolio)**:
+  - 초기 가상 원금 **2,000만원** (`INITIAL_CAPITAL = 20_000_000`) 기반 실시간 예수금·보유수량·실현손익(원)·총자산 추적
+  - **5슬롯 균등 배분**: 종목당 1회 최대 **400만원** (`SLOT_BUDGET = 4_000_000`) 한도 내에서 정수 주식 수(`qty = budget // buy_price`) 자동 계산
+- **장외 체결 착시 방지 (Pending Order)**: 장외(15:20~09:00 KST)에 발생한 시그널은 `진입대기`로 보류 후, 익일 오전장 초반(`09:00~10:00 KST`) 시초가 및 체결가 갭이 **-1.0% ~ +3.0% 이내**일 때만 실제 시세로 체결
 - **2트랙 매매 전략 (이원화 진입)**:
   - **트랙 A (모멘텀 돌파)**: 촉매형 호재($\ge +7$) + 코스피/나스닥 20일선 위 + $RSI \le 65$ + 이격도 $< 115\%$ + MACD 골든크로스
-  - **트랙 B (과매도 역발상)**: 극단적 과매도($RSI \le 35$) 구간에서 호재 발생 시 대세 하락장에서도 바닥 반등 매수 진입
+  - **트랙 B (과매도 역발상)**: 극단적 과매도($RSI \le 35$) 구간에서 강한 호재($\ge +6$) + **당일 양봉 반등(현재가 > 시초가)** 확인 시 바닥 반등 매수 진입
 - **철저한 리스크 관리**:
-  - ATR 기반 동적 목표가/손절가 설정 (목표가 Max $+5.0\%$ / 손절가 Max $-3.0\%$, 손익비 1.67:1 고정)
-  - **본절 스탑(Breakeven Ratchet)**: 최고 수익률 $+2.5\%$ 도달 시 손절선을 `매수가 × 1.003`(본절 + 수수료)로 자동 상향
+  - ATR 기반 동적 목표가/손절가 설정 (목표가 $+3.0\% \sim +4.0\%$ / 손절가 $-1.8\% \sim -2.5\%$)
+  - **본절 스탑(Breakeven Ratchet)**: 최고 수익률 $+2.0\%$ 도달 시 손절선을 `매수가 × 1.003`(본절 + 수수료)로 자동 상향
   - **포지션 쿨다운**: 동일 종목 보유 중복 진입 차단 및 청산 후 24시간 내 재진입 방지
 - **스마트 뉴스 크롤러 & 의미 중복 필터**:
   - 기사 제목 내 `"새 창 열림"` 등 불필요한 HTML 아티팩트 자동 제거
@@ -37,22 +40,22 @@ flowchart TD
         Cron[Cron Trigger: 7 * * * *] --> Main[main.py]
     end
 
-    subgraph Phase 0 ["Phase 0: 장외 대기주문 체결"]
+    subgraph Phase 0 ["Phase 0: 장외 대기주문 체결 (09:00~10:00 KST)"]
         Main --> P0{장외 진입대기 주문 존재?}
-        P0 -- Yes (정규장) --> GapCheck[시초가 갭 검사: <= +3.0%]
-        GapCheck -- 통과 --> Fill[실제 시초가로 체결 및 보유중 전환]
-        GapCheck -- 초과 --> Cancel[진입취소]
+        P0 -- Yes (09:00~10:00) --> GapCheck[시초가/체결가 갭 검사: -1.0% ~ +3.0%]
+        GapCheck -- 통과 & 예수금 충분 --> Fill[정수 수량 산출 후 체결 및 보유중 전환]
+        GapCheck -- 이탈 또는 10시 경과 --> Cancel[진입취소]
         P0 -- No --> P1
         Fill --> P1
         Cancel --> P1
     end
 
-    subgraph Phase 1 ["Phase 1: 보유 포지션 감시 & 청산"]
-        P1[보유 종목 모니터링] --> Bars[장중 5분봉 조회: High/Low 터치 감지]
-        Bars --> Breakeven[최고가 >= +2.5% 시 손절선을 본절로 상향]
+    subgraph Phase 1 ["Phase 1: 기존 보유 포지션 감시 & 청산"]
+        P1[보유 종목 모니터링] --> Bars[진입 시각 이후 장중 5분봉 조회]
+        Bars --> Breakeven[최고가 >= +2.0% 시 손절선을 본절로 상향]
         Bars --> ExitCheck{TP / SL 터치?}
-        ExitCheck -- 익절/손절/본절 --> DiscordSell[디스코드 매도 알림]
-        DiscordSell --> SheetSell[Active_Positions 시트 청산 완료 기록]
+        ExitCheck -- 익절/손절/본절 --> DiscordSell[디스코드 매도 및 실현손익 알림]
+        DiscordSell --> SheetSell[Active_Positions 청산 및 계좌잔고 기록]
         ExitCheck -- 유지 --> P2
         SheetSell --> P2
     end
@@ -62,7 +65,7 @@ flowchart TD
         Clean --> Gemini[Gemini AI 감성/유형 분석]
         Gemini --> Tech[yfinance 지표: RSI, ATR, 이격도, MACD]
         Tech --> Macro[KOSPI & NASDAQ 20MA 거시 지수 확인]
-        Macro --> Strategy{트랙 A / B 조건 검증}
+        Macro --> Strategy{트랙 A / B & 가용 예수금 검증}
         Strategy -- 장중 진입 --> DiscordBuy[디스코드 매수 알림] --> SheetBuy[Active_Positions 보유중 등록]
         Strategy -- 장외 진입 --> SheetPending[Active_Positions 진입대기 등록]
         Strategy -- 조건 미달 --> NewsLog[시트1 뉴스 로그 기록]
@@ -85,9 +88,9 @@ traiding_bot/
 │       └── keepalive.yml             # 60일 비활성화 방지 자동 커밋 워크플로우
 ├── tests/
 │   ├── __init__.py
-│   └── test_logic.py                 # 매매 알고리즘 및 필터 단위 테스트 (9개 테스트)
+│   └── test_logic.py                 # 매매 알고리즘, 필터, 가상계좌 단위 테스트 (10개 테스트)
 ├── main.py                           # 봇 실행 메인 파이프라인 (Phase 0, 1, 2)
-├── strategy.py                       # 순수 매매 알고리즘 (2트랙 판정, TP/SL 계산, 장외시간, 쿨다운)
+├── strategy.py                       # 순수 매매 알고리즘 및 2,000만원 가상계좌 수량/잔고 계산
 ├── dedup.py                          # 자카드 유사도 기반 의미 중복 기사 필터링
 ├── analyzer.py                       # Gemini API 감성 분석 및 기사 유형(catalyst/recap) 분류
 ├── chart.py                          # yfinance 실시간 시세, 5분봉, 지수 20일선, 기술지표 계산
@@ -95,7 +98,7 @@ traiding_bot/
 ├── db.py                             # Google Sheets(gspread) 배치 읽기/쓰기 인터페이스
 ├── notifier.py                       # 디스코드 웹훅 알림 카드 발송 모듈
 ├── track_performance.py              # 과거 뉴스 수집 건 사후 1/3/5일 수익률 자동 추적 스크립트
-├── config.py                         # 전략 파라미터 및 환경 변수 설정
+├── config.py                         # 전략 파라미터 및 가상 계좌 설정
 └── requirements.txt                  # 파이썬 의존성 패키지 목록
 ```
 
@@ -131,7 +134,7 @@ GitHub 레포지토리의 **Settings ➡️ Secrets and variables ➡️ Actions
 | 13~15 | 1일후수익률, 3일후수익률, 5일후수익률 | 장 마감 후 배치 스크립트가 추적 기입 |
 | 16 | 최종결과 | 진행중, 익절, 손절, 미진입 |
 
-### 2. `Active_Positions` (실시간 포지션 관리 탭 - 총 17열)
+### 2. `Active_Positions` (실시간 포지션 및 가상계좌 관리 탭 - 총 21열)
 | 열 번호 | 컬럼명 | 설명 |
 |:---:|---|---|
 | 1~3 | 진입일자, 종목코드, 종목명 | 포지션 기본 정보 |
@@ -140,6 +143,8 @@ GitHub 레포지토리의 **Settings ➡️ Secrets and variables ➡️ Actions
 | 8~11 | 청산일자, 청산가, 청산사유, 수익률(%) | 청산 완료 시 기록되는 성과 데이터 |
 | 12~13 | 최고가도달, 최고가도달률(%) | 트레일링/본절 스탑 감시용 최고가 추적 |
 | 14~17 | 시그널가, 진입트랙, 최종점검시각, 비고 | 장외 시그널가, 트랙(`A`/`B`), 래칫 상태 메모 |
+| **18~19** | **매수수량, 매수금액** | **종목당 400만원 한도 내 매수 주식 수(주) 및 총 매수원금(원)** |
+| **20~21** | **실현손익(원), 계좌잔고(원)** | **청산 시 확정 손익금(원) 및 2,000만원 기준 누적 총자산(원)** |
 
 ---
 
@@ -150,11 +155,10 @@ GitHub 레포지토리의 **Settings ➡️ Secrets and variables ➡️ Actions
 pip install -r requirements.txt
 ```
 
-### 2. 전략 및 필터 단위 테스트 실행 (네트워크 의존성 없음)
+### 2. 전략 및 가상계좌 단위 테스트 실행 (네트워크 의존성 없음)
 ```powershell
 python -m unittest tests/test_logic.py
 ```
-> 장외시간 판정, 모멘텀/역발상 트랙 판정, 시초가 갭 검증, 본절 스탑 래칫, 의미 중복 토큰화, 24시간 쿨다운 등 9개 핵심 테스트가 0.01초 내에 검증됩니다.
 
 ### 3. 드라이런 (Dry-Run) 모의 실행
 실제 구글 시트 쓰기 및 디스코드 발송을 생략하고 전체 파이프라인(크롤링 ➡️ 분석 ➡️ 보조지표 ➡️ 판정)만 테스트합니다:
@@ -162,34 +166,36 @@ python -m unittest tests/test_logic.py
 python main.py --dry-run
 ```
 
-### 4. 과거 뉴스 사후 성과 추적 배치 수동 실행
-```powershell
-python track_performance.py
-```
-
 ---
 
-## 📈 매매 전략 파라미터 (config.py)
+## 📈 매매 전략 및 가상계좌 파라미터 (config.py)
 
 ```python
+# 가상 계좌 (Paper Trading Portfolio) 설정
+INITIAL_CAPITAL = 20_000_000          # 초기 가상 원금 (2,000만원)
+MAX_POSITION_SLOTS = 5                # 최대 동시 보유 종목 수 (5종목)
+SLOT_BUDGET = 4_000_000               # 종목당 1회 최대 매수 한도 (400만원)
+
 # 정규장 및 장외 대기 시간
 MARKET_OPEN_HHMM = (9, 0)
 MARKET_ENTRY_CUTOFF_HHMM = (15, 20)
-MAX_GAP_UP_PCT = 3.0          # 익일 시초가 갭상승 상한 (+3.0%)
+PENDING_FILL_DEADLINE_HHMM = (10, 0)  # 대기주문 체결 허용 구간 (09:00~10:00)
+MIN_GAP_PCT = -1.0                    # 익일 시초가/체결가 갭하락 하한 (-1.0%)
+MAX_GAP_UP_PCT = 3.0                  # 익일 시초가/체결가 갭상승 상한 (+3.0%)
 
 # 트랙 A: 호재 모멘텀 돌파
 MOMENTUM_SCORE_MIN = 7
 MOMENTUM_RSI_MAX = 65
 MOMENTUM_DISPARITY_MAX = 115
 
-# 트랙 B: 과매도 눌림목 역발상
+# 트랙 B: 과매도 눌림목 역발상 (강한 호재 + 당일 양봉 반등 필수)
 CONTRARIAN_RSI_MAX = 35
-CONTRARIAN_SCORE_MIN = 3
+CONTRARIAN_SCORE_MIN = 6
 
 # 리스크 관리
-TARGET_PCT_MIN, TARGET_PCT_MAX = 2.5, 5.0   # 목표가 상·하한 (+2.5% ~ +5.0%)
-STOP_PCT_MIN, STOP_PCT_MAX = 1.5, 3.0       # 손절가 상·하한 (-1.5% ~ -3.0%)
-BREAKEVEN_TRIGGER_PCT = 2.5                 # +2.5% 터치 시 본절 스탑 가동
+TARGET_PCT_MIN, TARGET_PCT_MAX = 3.0, 4.0   # 목표가 상·하한 (+3.0% ~ +4.0%)
+STOP_PCT_MIN, STOP_PCT_MAX = 1.8, 2.5       # 손절가 상·하한 (-1.8% ~ -2.5%)
+BREAKEVEN_TRIGGER_PCT = 2.0                 # +2.0% 터치 시 본절 스탑 가동
 BREAKEVEN_STOP_MULT = 1.003                 # 본절 손절가 (매수가 × 1.003)
 REENTRY_COOLDOWN_HOURS = 24                 # 청산 후 동일 종목 24시간 쿨다운
 ```

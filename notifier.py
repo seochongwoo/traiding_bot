@@ -1,10 +1,25 @@
 import requests
 from datetime import datetime
-from config import DISCORD_WEBHOOK_GENERAL, DISCORD_WEBHOOK_SELL
+from config import DISCORD_WEBHOOK_GENERAL, DISCORD_WEBHOOK_SELL, INITIAL_CAPITAL
 
-def send_discord_signal(keyword: str, title: str, url: str, score: int, summary: str, keywords: list, 
-                        buy_price: float, target_price: float, stop_loss: float, rsi: float, atr: float,
-                        track: str = "A") -> bool:
+def send_discord_signal(
+    keyword: str,
+    title: str,
+    url: str,
+    score: int,
+    summary: str,
+    keywords: list,
+    buy_price: float,
+    target_price: float,
+    stop_loss: float,
+    rsi: float,
+    atr: float,
+    track: str = "A",
+    qty: int = 0,
+    invest_amount: float = 0.0,
+    available_cash: float = None,
+    total_equity: float = None,
+) -> bool:
     """
     DISCORD_WEBHOOK_GENERAL 채널로 주가 뉴스 분석 시그널 및 매수 진입 카드를 발송합니다.
     """
@@ -20,7 +35,19 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
         signal_type = "🟢 [AI 모멘텀 돌파 매수 진입 - 트랙 A]"
     
     keywords_str = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
-    
+
+    price_info_lines = [
+        f"💵 **체결가**: `{buy_price:,.0f}원`",
+        f"🎯 **목표가(상한)**: `{target_price:,.0f}원`",
+        f"🛡️ **손절가(하한)**: `{stop_loss:,.0f}원`",
+    ]
+    if qty > 0:
+        inv_val = invest_amount if invest_amount > 0 else buy_price * qty
+        price_info_lines.append(f"📦 **매수 수량**: `{qty:,}주` (매수금액 `{inv_val:,.0f}원`)")
+    if available_cash is not None:
+        eq_str = f" / 총자산 `{total_equity:,.0f}원`" if total_equity is not None else ""
+        price_info_lines.append(f"🏦 **잔여 예수금**: `{available_cash:,.0f}원`{eq_str}")
+
     payload = {
         "embeds": [
             {
@@ -29,8 +56,8 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
                 "color": color,
                 "fields": [
                     {
-                        "name": "💰 매수 정보 설정",
-                        "value": f"💵 **체결가**: `{buy_price:,.0f}원`\n🎯 **목표가(상한)**: `{target_price:,.0f}원`\n🛡️ **손절가(하한)**: `{stop_loss:,.0f}원`",
+                        "name": "💰 매수 및 가상계좌 정보",
+                        "value": "\n".join(price_info_lines),
                         "inline": False
                     },
                     {
@@ -74,9 +101,20 @@ def send_discord_signal(keyword: str, title: str, url: str, score: int, summary:
         print(f"Exception while sending Discord BUY notification: {e}")
         return False
 
-def send_discord_sell_alert(keyword: str, symbol: str, buy_price: float, sell_price: float, 
-                            target_price: float, stop_loss: float, is_profit: bool,
-                            reason_str: str = "") -> bool:
+def send_discord_sell_alert(
+    keyword: str,
+    symbol: str,
+    buy_price: float,
+    sell_price: float,
+    target_price: float,
+    stop_loss: float,
+    is_profit: bool,
+    reason_str: str = "",
+    qty: int = 0,
+    pnl_krw: float = None,
+    available_cash: float = None,
+    total_equity: float = None,
+) -> bool:
     """
     DISCORD_WEBHOOK_SELL 채널로 포지션 청산(익절/손절/본절) 메시지를 발송합니다.
     """
@@ -103,6 +141,17 @@ def send_discord_sell_alert(keyword: str, symbol: str, buy_price: float, sell_pr
     return_rate = ((sell_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
     return_rate_str = f"{return_rate:+.2f}%"
 
+    summary_lines = [
+        f"📈 **수익률**: `{return_rate_str}`",
+        f"📢 **청산 사유**: **{reason}**",
+    ]
+    if qty > 0 and pnl_krw is not None:
+        summary_lines.append(f"💰 **실현 손익**: `{pnl_krw:+,.0f}원` ({qty:,}주)")
+    if total_equity is not None:
+        acct_ret = ((total_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100 if INITIAL_CAPITAL > 0 else 0.0
+        cash_str = f" (가용 예수금 `{available_cash:,.0f}원`)" if available_cash is not None else ""
+        summary_lines.append(f"🏦 **계좌 총자산**: `{total_equity:,.0f}원` (`{acct_ret:+.2f}%`){cash_str}")
+
     payload = {
         "embeds": [
             {
@@ -111,8 +160,8 @@ def send_discord_sell_alert(keyword: str, symbol: str, buy_price: float, sell_pr
                 "color": color,
                 "fields": [
                     {
-                        "name": "📊 청산 요약",
-                        "value": f"📈 **수익률**: `{return_rate_str}`\n📢 **청산 사유**: **{reason}**",
+                        "name": "📊 청산 및 계좌 요약",
+                        "value": "\n".join(summary_lines),
                         "inline": False
                     },
                     {
@@ -157,7 +206,11 @@ if __name__ == "__main__":
             target_price=250000,
             stop_loss=210000,
             rsi=43.5,
-            atr=8500
+            atr=8500,
+            qty=17,
+            invest_amount=3910000,
+            available_cash=16090000,
+            total_equity=20000000
         )
     if os.getenv("DISCORD_WEBHOOK_SELL"):
         print("Testing SELL alert...")
@@ -168,5 +221,9 @@ if __name__ == "__main__":
             sell_price=252000,
             target_price=250000,
             stop_loss=210000,
-            is_profit=True
+            is_profit=True,
+            qty=17,
+            pnl_krw=374000,
+            available_cash=20374000,
+            total_equity=20374000
         )
