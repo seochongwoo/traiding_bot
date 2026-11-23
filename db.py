@@ -83,6 +83,47 @@ def fetch_existing_urls(sheet) -> set:
         print(f"Exception while fetching existing URLs: {e}")
         return set()
 
+def fetch_sheet1_state(sheet, hours: int = 12):
+    """
+    시트1 전체를 단 1회만 읽어서 (existing_urls: set, recent_titles_by_kw: dict)를 동시에 반환합니다.
+    키워드별로 시트1 전체를 5~6회 반복 다운로드하던 API 병목을 제거합니다.
+    """
+    existing_urls = set()
+    recent_titles_by_kw = {}
+    if not sheet:
+        return existing_urls, recent_titles_by_kw
+
+    try:
+        from datetime import datetime, timedelta, timezone
+        kst = timezone(timedelta(hours=9))
+        cutoff = datetime.now(timezone.utc).astimezone(kst) - timedelta(hours=hours)
+        all_vals = sheet.get_all_values()
+        if len(all_vals) <= 1:
+            return existing_urls, recent_titles_by_kw
+
+        for row in all_vals[1:]:
+            if len(row) >= 4 and row[3].strip():
+                existing_urls.add(row[3].strip())
+
+        for row in reversed(all_vals[1:]):
+            if len(row) < 3:
+                continue
+            date_str = row[0].strip()
+            kw = row[1].strip()
+            title = row[2].strip()
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=kst)
+                if dt < cutoff:
+                    break
+                recent_titles_by_kw.setdefault(kw, []).append(title)
+            except ValueError:
+                continue
+
+        return existing_urls, recent_titles_by_kw
+    except Exception as e:
+        print(f"Warning: Failed to fetch sheet1 state in one pass: {e}")
+        return existing_urls, recent_titles_by_kw
+
 def append_news_record(sheet, datetime_str: str, keyword: str, title: str, url: str, score: int, 
                        summary: str, keywords: list, rsi=None, disparity=None, macd_dead_cross=None, 
                        entry_price=None, entry_yn: str = "N") -> bool:
@@ -157,36 +198,8 @@ def fetch_recent_titles(sheet, keyword: str, hours: int = 12) -> list:
     """
     시트1에서 최근 N시간 내에 수집된 해당 키워드의 뉴스 제목 목록을 반환합니다 (의미 중복 필터링용).
     """
-    if not sheet:
-        return []
-    try:
-        from datetime import datetime, timedelta, timezone
-        kst = timezone(timedelta(hours=9))
-        cutoff = datetime.now(timezone.utc).astimezone(kst) - timedelta(hours=hours)
-        all_vals = sheet.get_all_values()
-        if len(all_vals) <= 1:
-            return []
-        
-        recent_titles = []
-        for row in reversed(all_vals[1:]):
-            if len(row) < 3:
-                continue
-            date_str = row[0].strip()
-            kw = row[1].strip()
-            title = row[2].strip()
-            if kw != keyword:
-                continue
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=kst)
-                if dt < cutoff:
-                    break
-                recent_titles.append(title)
-            except ValueError:
-                continue
-        return recent_titles
-    except Exception as e:
-        print(f"Warning: Failed to fetch recent titles: {e}")
-        return []
+    _, recent_by_kw = fetch_sheet1_state(sheet, hours=hours)
+    return recent_by_kw.get(keyword, [])
 
 def _safe_float(val: str, default=0.0):
     val_s = val.strip().replace(",", "") if val else ""

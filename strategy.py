@@ -23,7 +23,7 @@ def is_session_time(dt: datetime) -> bool:
 
 
 def is_pending_fill_window(dt: datetime) -> bool:
-    """장외 대기주문 체결 허용 시간대: 평일 오전장 초반(09:00 ~ 10:00 KST)."""
+    """장외 대기주문 체결 허용 시간대: 평일 오전장(09:00 ~ 11:30 KST, GitHub Actions 큐 지연 대응)."""
     dt = dt.astimezone(KST) if dt.tzinfo else dt.replace(tzinfo=KST)
     if not is_session_time(dt):
         return False
@@ -45,9 +45,13 @@ def evaluate_entry(
     market_ok,
     current_price=None,
     open_price=None,
+    is_session=True,
 ):
     """
     진입 트랙을 판정합니다.
+    - 정규장(is_session=True) 트랙 B 진입 시에는 당일 양봉 반등(current_price > open_price)을 즉시 요구합니다.
+    - 장외 시간(is_session=False) 트랙 B 시그널은 직전 거래일이 음봉이었더라도 '진입대기' 등록을 허용하고,
+      익일 오전 정규장(Phase 0)에서 시초가 대비 양봉 반등 여부를 검증합니다.
     반환: (track, reasons)  track은 "A"(모멘텀) / "B"(역발상) / None
     """
     if article_type != "catalyst":
@@ -73,9 +77,9 @@ def evaluate_entry(
     if not a_fail:
         return "A", []
 
-    # 트랙 B: 과매도 구간의 강한 호재 + 당일 양봉 반등 확인 필수 (떨어지는 칼날 진입 차단)
+    # 트랙 B: 과매도 구간의 강한 호재 + (정규장일 경우) 당일 양봉 반등 확인 필수
     if rsi <= C.CONTRARIAN_RSI_MAX and score >= C.CONTRARIAN_SCORE_MIN:
-        if current_price is not None and open_price is not None and open_price > 0:
+        if is_session and current_price is not None and open_price is not None and open_price > 0:
             if current_price <= open_price:
                 return None, a_fail + ["트랙B 음봉 하락중(양봉 반등 미확인)"]
         return "B", []
@@ -161,7 +165,7 @@ def compute_portfolio_state(positions: list, initial_capital: int = None) -> dic
     """
     Active_Positions 행 목록으로부터 가상 계좌(초기 원금 2,000만원) 상태를 계산합니다.
     - 매수수량(qty > 0)이 기록된 가상계좌 거래만 합산하므로, 과거 수량 미기재(레거시) 행은 잔고에 영향을 주지 않습니다.
-    반환: dict(initial_capital, available_cash, invested_amount, realized_pnl, total_equity, total_return_pct, active_slots)
+    - 장외 '진입대기' 주문 수(pending_slots)와 예상 예약 금액을 함께 집계하여 장외 대기주문 남발을 방지합니다.
     """
     if initial_capital is None:
         initial_capital = C.INITIAL_CAPITAL
@@ -169,13 +173,23 @@ def compute_portfolio_state(positions: list, initial_capital: int = None) -> dic
     realized_pnl = 0
     invested_amount = 0
     active_slots = 0
+    pending_slots = 0
+    pending_reserved_cash = 0
 
     for p in positions:
+        status = p.get("status", "")
+        if status == "진입대기":
+            pending_slots += 1
+            sig_price = float(p.get("signal_price") or p.get("buy_price") or 0.0)
+            if sig_price > 0:
+                est_qty = int(C.SLOT_BUDGET // sig_price)
+                pending_reserved_cash += round(sig_price * max(0, est_qty))
+            continue
+
         qty = int(p.get("qty") or 0)
         if qty <= 0:
             continue
 
-        status = p.get("status", "")
         buy_price = float(p.get("buy_price") or 0.0)
         close_price = float(p.get("close_price") or 0.0)
 
@@ -193,16 +207,20 @@ def compute_portfolio_state(positions: list, initial_capital: int = None) -> dic
 
     total_equity = initial_capital + realized_pnl
     available_cash = max(0, total_equity - invested_amount)
+    unreserved_cash = max(0, available_cash - pending_reserved_cash)
     total_return_pct = (realized_pnl / initial_capital) * 100 if initial_capital > 0 else 0.0
 
     return {
         "initial_capital": round(initial_capital),
         "available_cash": round(available_cash),
+        "unreserved_cash": round(unreserved_cash),
         "invested_amount": round(invested_amount),
         "realized_pnl": round(realized_pnl),
         "total_equity": round(total_equity),
         "total_return_pct": round(total_return_pct, 2),
         "active_slots": active_slots,
+        "pending_slots": pending_slots,
+        "reserved_slots": active_slots + pending_slots,
     }
 
 
