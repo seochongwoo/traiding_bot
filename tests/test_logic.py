@@ -21,10 +21,15 @@ class TestStrategyLogic(unittest.TestCase):
         self.assertTrue(is_session_time(t_open))
         self.assertTrue(is_pending_fill_window(t_open))
 
-        # 오전 10:00 이후는 정규장이지만 대기주문 체결 허용 시간(09:00~10:00) 경과
-        t_late_morning = datetime(2026, 10, 15, 10, 13, tzinfo=KST)
-        self.assertTrue(is_session_time(t_late_morning))
-        self.assertFalse(is_pending_fill_window(t_late_morning))
+        # 오전 10:25는 GitHub Actions 큐 지연 대응 범위(09:00~11:30) 내이므로 체결 허용
+        t_delayed_morning = datetime(2026, 10, 15, 10, 25, tzinfo=KST)
+        self.assertTrue(is_session_time(t_delayed_morning))
+        self.assertTrue(is_pending_fill_window(t_delayed_morning))
+
+        # 오전 11:30 이후는 정규장이지만 대기주문 체결 허용 시간(09:00~11:30) 경과
+        t_after_deadline = datetime(2026, 10, 15, 11, 45, tzinfo=KST)
+        self.assertTrue(is_session_time(t_after_deadline))
+        self.assertFalse(is_pending_fill_window(t_after_deadline))
 
         t_close_after = datetime(2026, 10, 15, 15, 30, tzinfo=KST)
         self.assertFalse(is_session_time(t_close_after))
@@ -47,7 +52,7 @@ class TestStrategyLogic(unittest.TestCase):
         self.assertEqual(reasons, [])
 
     def test_contrarian_track_b_requires_strong_score_and_bullish_candle(self):
-        # 1) 과매도(RSI=28) + 강한 호재(score=6) + 당일 양봉 반등(현재가 > 시초가) -> 트랙 B 승인
+        # 1) 정규장(is_session=True): 과매도(RSI=28) + 강한 호재(score=6) + 당일 양봉 반등(현재가 > 시초가) -> 트랙 B 승인
         track, reasons = evaluate_entry(
             score=6,
             article_type="catalyst",
@@ -56,12 +61,13 @@ class TestStrategyLogic(unittest.TestCase):
             macd_dead_cross=True,
             market_ok=False,
             current_price=300000,
-            open_price=295000
+            open_price=295000,
+            is_session=True,
         )
         self.assertEqual(track, "B")
         self.assertEqual(reasons, [])
 
-        # 2) 과매도지만 음봉 하락 중(현재가 <= 시초가)이면 떨어지는 칼날 방지를 위해 차단
+        # 2) 정규장(is_session=True): 과매도지만 음봉 하락 중(현재가 <= 시초가)이면 떨어지는 칼날 방지를 위해 차단
         track_bear, reasons_bear = evaluate_entry(
             score=6,
             article_type="catalyst",
@@ -70,12 +76,28 @@ class TestStrategyLogic(unittest.TestCase):
             macd_dead_cross=True,
             market_ok=False,
             current_price=292000,
-            open_price=295000
+            open_price=295000,
+            is_session=True,
         )
         self.assertIsNone(track_bear)
         self.assertTrue(any("음봉" in r for r in reasons_bear))
 
-        # 3) 약한 호재(score=4)는 트랙 B 진입 차단
+        # 3) 장외 시간(is_session=False): 직전 거래일이 음봉이었더라도 '진입대기' 등록을 위해 트랙 B 승인 (익일 아침 Phase 0에서 양봉 확인)
+        track_offhours, reasons_offhours = evaluate_entry(
+            score=6,
+            article_type="catalyst",
+            rsi=34.4,
+            disparity=88.5,
+            macd_dead_cross=True,
+            market_ok=False,
+            current_price=183100,
+            open_price=188100,
+            is_session=False,
+        )
+        self.assertEqual(track_offhours, "B")
+        self.assertEqual(reasons_offhours, [])
+
+        # 4) 약한 호재(score=4)는 트랙 B 진입 차단
         track_weak, _ = evaluate_entry(
             score=4,
             article_type="catalyst",
@@ -180,7 +202,7 @@ class TestStrategyLogic(unittest.TestCase):
         self.assertEqual(qty, 18)
         self.assertEqual(inv, 3_960_000)
 
-        # 3) 보유중 1건 + 청산완료 1건(+120,000원 수익) 반영 확인
+        # 3) 보유중 1건 + 청산완료 1건(+120,000원 수익) + 장외 진입대기 1건 반영 확인
         positions.append({
             "symbol": "005930.KS",
             "status": "보유중",
@@ -198,13 +220,21 @@ class TestStrategyLogic(unittest.TestCase):
             "qty": 12,
             "pnl_krw": pnl,
         })
+        positions.append({
+            "symbol": "000660.KS",
+            "status": "진입대기",
+            "signal_price": 1_000_000,
+        })
 
         pf2 = compute_portfolio_state(positions, initial_capital=20_000_000)
         self.assertEqual(pf2["realized_pnl"], 120_000)
         self.assertEqual(pf2["total_equity"], 20_120_000)
         self.assertEqual(pf2["invested_amount"], 3_960_000)
         self.assertEqual(pf2["available_cash"], 16_160_000)
+        self.assertEqual(pf2["unreserved_cash"], 12_160_000)
         self.assertEqual(pf2["active_slots"], 1)
+        self.assertEqual(pf2["pending_slots"], 1)
+        self.assertEqual(pf2["reserved_slots"], 2)
 
         # 4) 5슬롯 모두 찬 경우 추가 진입 불가 (qty=0)
         qty_full, _ = compute_order_qty(200_000, 5_000_000, active_slots=5)

@@ -110,6 +110,7 @@ def check_market_trend():
     """
     코스피(^KS11)와 나스닥(^IXIC)의 현재 지수가 각각 20일선 위에 있는지 검사합니다.
     두 지수가 모두 20일선 위에 있으면 (True, True)를 반환합니다.
+    조회 실패 또는 데이터 부족 시에는 보수적 리스크 관리를 위해 False(Fail-Closed)를 반환합니다.
     """
     indices = {
         "KOSPI": "^KS11",
@@ -122,16 +123,16 @@ def check_market_trend():
             # 20일선 계산을 위해 2개월 데이터를 받습니다.
             df = yf.Ticker(ticker).history(period="2mo")
             if df.empty:
-                print(f"Warning: Empty data for index {name} ({ticker}). Assuming True.")
-                results[name] = True
+                print(f"Warning: Empty data for index {name} ({ticker}). Assuming False (Fail-Closed).")
+                results[name] = False
                 continue
                 
             # NaN 값 제거 (미장 개장 전 또는 휴일 빈 데이터 방지)
             df = df.dropna(subset=['Close'])
             
             if len(df) < 20:
-                print(f"Warning: Not enough data points ({len(df)}) for index {name} ({ticker}) after dropping NaNs. Assuming True.")
-                results[name] = True
+                print(f"Warning: Not enough data points ({len(df)}) for index {name} ({ticker}). Assuming False (Fail-Closed).")
+                results[name] = False
                 continue
             
             current_close = float(df['Close'].iloc[-1])
@@ -142,10 +143,10 @@ def check_market_trend():
             results[name] = is_above
             print(f"[{name}] Close: {current_close:,.2f} | SMA20: {current_sma20:,.2f} | Above 20MA: {is_above}")
         except Exception as e:
-            print(f"Exception during market trend check for {name} ({ticker}): {e}. Assuming True.")
-            results[name] = True
+            print(f"Exception during market trend check for {name} ({ticker}): {e}. Assuming False (Fail-Closed).")
+            results[name] = False
             
-    return results.get("KOSPI", True), results.get("NASDAQ", True)
+    return results.get("KOSPI", False), results.get("NASDAQ", False)
 
 def get_intraday_bars(keyword: str, since_dt=None):
     """

@@ -19,13 +19,14 @@ if "--dry-run" in sys.argv:
 from config import (
     TARGET_KEYWORDS, MAX_NEWS_PER_KEYWORD, KEYWORD_SYNONYMS, TICKER_MAP, 
     DRY_RUN, DEDUP_WINDOW_HOURS, DEDUP_JACCARD, PENDING_MAX_AGE_HOURS,
-    MIN_GAP_PCT, MAX_GAP_UP_PCT, INITIAL_CAPITAL, MAX_POSITION_SLOTS, SLOT_BUDGET
+    PENDING_FILL_DEADLINE_HHMM, MIN_GAP_PCT, MAX_GAP_UP_PCT,
+    INITIAL_CAPITAL, MAX_POSITION_SLOTS, SLOT_BUDGET
 )
 from crawler import fetch_news_list, get_news_content
 from db import (
-    open_worksheet, fetch_existing_urls, fetch_all_positions, fetch_active_positions,
+    open_worksheet, fetch_sheet1_state, fetch_all_positions,
     batch_update_position, liquidate_position, update_position_highest,
-    add_active_position, append_news_records, fetch_recent_titles
+    add_active_position, append_news_records
 )
 from analyzer import analyze_news_sentiment
 from notifier import send_discord_signal, send_discord_sell_alert
@@ -39,6 +40,7 @@ from dedup import find_duplicate
 
 
 def print_portfolio_banner(portfolio: dict, label: str = "가상 계좌 현황"):
+    pending_info = f", 대기예약 {portfolio.get('pending_slots', 0)}건" if portfolio.get("pending_slots") else ""
     print(f"\n💼 [{label}] (원금 {portfolio['initial_capital']:,.0f}원 | 종목당 한도 {SLOT_BUDGET:,.0f}원)")
     print(
         f"   - 총자산(확정기준): {portfolio['total_equity']:,.0f}원 "
@@ -47,7 +49,7 @@ def print_portfolio_banner(portfolio: dict, label: str = "가상 계좌 현황")
     print(
         f"   - 가용 예수금: {portfolio['available_cash']:,.0f}원 | "
         f"보유 매수원금: {portfolio['invested_amount']:,.0f}원 "
-        f"(슬롯: {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
+        f"(슬롯: {portfolio['active_slots']}/{MAX_POSITION_SLOTS}{pending_info})"
     )
 
 
@@ -56,6 +58,7 @@ def run_trading_bot():
     is_session = is_session_time(current_kst)
     in_fill_window = is_pending_fill_window(current_kst)
     current_kst_str = current_kst.strftime("%Y-%m-%d %H:%M:%S")
+    deadline_str = f"{PENDING_FILL_DEADLINE_HHMM[0]:02d}:{PENDING_FILL_DEADLINE_HHMM[1]:02d}"
 
     print("==================================================")
     print(f"Starting Serverless AI Trading Bot at {current_kst_str} KST")
@@ -69,6 +72,14 @@ def run_trading_bot():
 
     portfolio = compute_portfolio_state(all_positions)
     print_portfolio_banner(portfolio, label="시작 시점 가상 계좌 현황")
+
+    # 동일 턴 내 종목별 차트 지표 중복 조회 방지용 메모리 캐시
+    chart_cache = {}
+
+    def get_cached_indicators(kw: str):
+        if kw not in chart_cache:
+            chart_cache[kw] = get_stock_indicators(kw)
+        return chart_cache[kw]
 
     # 중요: Phase 0에서 방금 체결된 주문이 같은 턴의 Phase 1에서 '체결 이전 아침 봉'으로 자폭 손절되는 버그를 막기 위해
     # 기존 보유중이던 포지션만 Phase 1 감시 대상으로 먼저 분리합니다.
@@ -105,19 +116,19 @@ def run_trading_bot():
             except Exception:
                 pass
 
-            # 2. 오전장 초반(09:00 ~ 10:00 KST)이 지났다면 오후 뒤늦은 고점 추격 체결을 막기 위해 취소 처리
+            # 2. 오전장 체결 허용 시간(09:00 ~ 11:30 KST)이 지났다면 오후 뒤늦은 고점 추격 체결을 막기 위해 취소 처리
             if not in_fill_window:
-                print("   -> Past morning fill window (09:00~10:00 KST). Cancelling stale pending order.")
+                print(f"   -> Past morning fill window (09:00~{deadline_str} KST). Cancelling stale pending order.")
                 batch_update_position(pos_sheet, row_num, {
                     7: "진입취소",
                     16: current_kst_str,
-                    17: "오전장 체결 시간(10:00) 경과 취소"
+                    17: f"오전장 체결 시간({deadline_str}) 경과 취소"
                 })
                 p["status"] = "진입취소"
                 continue
 
             today_open = get_today_open(name)
-            chart_data = get_stock_indicators(name)
+            chart_data = get_cached_indicators(name)
             if not today_open or not chart_data:
                 print(f"   -> Failed to fetch opening/current price for {name}. Keeping pending.")
                 continue
@@ -127,8 +138,8 @@ def run_trading_bot():
             gap_pct, can_enter = gap_check(sig_price, today_open, fill_price=fill_price)
             fill_gap_pct = (fill_price / sig_price - 1) * 100
 
-            # 트랙 B 대기주문인 경우 시초가 대비 음봉 하락 중이면 체결 거부
-            track_b_bearish = (p.get("track") == "B" and current_price < today_open)
+            # 트랙 B 대기주문인 경우 시초가 대비 양봉 반등(current_price > today_open)이 확인되지 않으면 체결 거부
+            track_b_bearish = (p.get("track") == "B" and current_price <= today_open)
             if track_b_bearish:
                 can_enter = False
 
@@ -210,7 +221,7 @@ def run_trading_bot():
                         f"슬롯 {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
                     )
                 elif track_b_bearish:
-                    reason_detail = f"트랙B 시초가 대비 음봉 하락 ({current_price:,.0f}원 < 시초가 {today_open:,.0f}원)"
+                    reason_detail = f"트랙B 시초가 대비 양봉 미확인 ({current_price:,.0f}원 <= 시초가 {today_open:,.0f}원)"
                 elif gap_pct < MIN_GAP_PCT:
                     reason_detail = f"시초가 갭하락 이탈 ({gap_pct:+.2f}% < {MIN_GAP_PCT:+.1f}%)"
                 else:
@@ -263,7 +274,7 @@ def run_trading_bot():
 
         # 장중 5분봉 조회 (진입/점검 시각 이후의 High/Low 터치만 감지)
         bars = get_intraday_bars(keyword, since_dt=last_dt)
-        chart_data = get_stock_indicators(keyword)
+        chart_data = get_cached_indicators(keyword)
         if not bars and chart_data:
             cp = chart_data["current_price"]
             bars = [(cp, cp, cp, cp)]
@@ -358,13 +369,15 @@ def run_trading_bot():
     market_ok = bool(kospi_ok and nasdaq_ok)
     if not market_ok:
         print(f"⚠️ [대세 하락장 상태 감지] KOSPI: {kospi_ok} | NASDAQ: {nasdaq_ok}")
-        print("Market is in a downtrend. Track A momentum is blocked; Track B requires Score>=6 + RSI<=35 + bullish rebound.")
+        print("Market is in a downtrend. Track A momentum is blocked; Track B requires Score>=6 + RSI<=35 + session bullish rebound.")
     else:
         print("✅ [시장 상승세 판정] KOSPI와 NASDAQ이 모두 20일선 위에 있습니다.")
 
     news_sheet = open_worksheet("시트1") if not DRY_RUN else None
-    existing_urls = fetch_existing_urls(news_sheet) if news_sheet else set()
-    print(f"Loaded {len(existing_urls)} existing URLs from '시트1'.")
+    existing_urls, recent_titles_by_kw = (
+        fetch_sheet1_state(news_sheet, hours=DEDUP_WINDOW_HOURS) if news_sheet else (set(), {})
+    )
+    print(f"Loaded {len(existing_urls)} existing URLs from '시트1' in a single pass.")
 
     new_articles_count = 0
     new_entries_count = 0
@@ -373,8 +386,7 @@ def run_trading_bot():
         symbol = TICKER_MAP.get(keyword, "")
         print(f"\nTargeting Keyword: '{keyword}' ({symbol})")
         
-        # 최근 12시간 내 수집된 제목들 로드 (의미 중복 필터용)
-        recent_titles = fetch_recent_titles(news_sheet, keyword, hours=DEDUP_WINDOW_HOURS) if news_sheet else []
+        recent_titles = recent_titles_by_kw.get(keyword, [])
         news_items = fetch_news_list(keyword, limit=MAX_NEWS_PER_KEYWORD)
         print(f"Found {len(news_items)} news items for '{keyword}'. Recent titles for dedup: {len(recent_titles)}")
 
@@ -420,8 +432,8 @@ def run_trading_bot():
 
             print(f"Analysis result -> Score: {score:+}, Type: {article_type}, Summary: {summary[:60]}...")
 
-            # 기술적 지표 조회
-            chart_data = get_stock_indicators(keyword)
+            # 기술적 지표 조회 (동일 턴 내 캐시 재사용)
+            chart_data = get_cached_indicators(keyword)
             rsi = chart_data["rsi"] if chart_data else None
             atr = chart_data["atr"] if chart_data else None
             disparity = chart_data["disparity"] if chart_data else None
@@ -429,10 +441,10 @@ def run_trading_bot():
             current_price = chart_data["current_price"] if chart_data else 0.0
             open_price = chart_data.get("open_price") if chart_data else None
 
-            # 2개 트랙(A: 모멘텀, B: 역발상+양봉확인) 판정
+            # 2개 트랙(A: 모멘텀, B: 역발상+정규장 양봉확인) 판정
             track, reasons = evaluate_entry(
                 score, article_type, rsi, disparity, macd_dead_cross, market_ok,
-                current_price=current_price, open_price=open_price
+                current_price=current_price, open_price=open_price, is_session=is_session
             )
 
             # 중복 보유 및 쿨다운 검증
@@ -440,16 +452,16 @@ def run_trading_bot():
                 reasons.append("이미 보유/대기/쿨다운")
                 track = None
 
-            # 정규장 진입 시 가상 계좌 가용 예수금 및 슬롯 한도 검증
+            # 정규장 및 장외 진입대기 모두 가상 계좌 가용 예수금 및 슬롯 한도(보유+대기<=5) 검증
             portfolio = compute_portfolio_state(all_positions)
             order_qty, invest_amount = 0, 0
-            if track and is_session:
-                order_qty, invest_amount = compute_order_qty(
-                    current_price, portfolio["available_cash"], portfolio["active_slots"]
-                )
+            if track:
+                usable_cash = portfolio["available_cash"] if is_session else portfolio["unreserved_cash"]
+                used_slots = portfolio["active_slots"] if is_session else portfolio["reserved_slots"]
+                order_qty, invest_amount = compute_order_qty(current_price, usable_cash, used_slots)
                 if order_qty <= 0:
                     reasons.append(
-                        f"예수금/슬롯 부족(가용 {portfolio['available_cash']:,.0f}원, 슬롯 {portfolio['active_slots']}/{MAX_POSITION_SLOTS})"
+                        f"예수금/슬롯 부족(가용 {usable_cash:,.0f}원, 슬롯 {used_slots}/{MAX_POSITION_SLOTS})"
                     )
                     track = None
 
@@ -517,7 +529,10 @@ def run_trading_bot():
                 else:
                     # 장외 시간: 진입대기로 등록 (전일 종가 즉시 체결 방지, 수량은 다음 정규장 시초가 체결 시 확정)
                     entry_yn = f"대기-{track}"
-                    print(f"⏳ [Pending Order Created - Track {track}] {keyword} at Signal {current_price:,.0f}원 (장외 발생)")
+                    print(
+                        f"⏳ [Pending Order Created - Track {track}] {keyword} at Signal {current_price:,.0f}원 "
+                        f"(예상 {order_qty}주 / 장외 발생)"
+                    )
                     
                     if pos_sheet and not DRY_RUN:
                         add_active_position(
@@ -533,7 +548,13 @@ def run_trading_bot():
                             track=track,
                             note="장외 발생",
                         )
-                    all_positions.append({"symbol": symbol, "name": keyword, "status": "진입대기", "date": current_kst_str})
+                    all_positions.append({
+                        "symbol": symbol,
+                        "name": keyword,
+                        "status": "진입대기",
+                        "date": current_kst_str,
+                        "signal_price": current_price,
+                    })
                     new_entries_count += 1
             else:
                 entry_yn = f"N ({', '.join(reasons)})"
